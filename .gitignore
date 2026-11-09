@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+
+# Environment & Secrets
+.env
+.env.*
+*.pem
+*token*.json
+*credentials*.json
+.sync-config.json
+
+# Sync temporary files
+.sync_tmp/
+*.conflict-*
+
+# Logs & OS files
+*.log
+.DS_Store
+Thumbs.db
