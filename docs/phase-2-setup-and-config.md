@@ -1,7 +1,7 @@
 # Chi Tiết Giai Đoạn 2: Khởi Tạo Monorepo & Quản Lý Cấu Hình (`ConfigService`)
 
 > **Trạng thái**: ✅ Đã hoàn thành toàn bộ Giai đoạn 2 (Task 2.1 -> Task 2.5)
-> **Mục tiêu giai đoạn**: Dựng bộ khung dự án Monorepo (`pnpm`) cho cả 3 gói (`shared`, `desktop-agent`, `web-ui`), xây dựng hệ thống lưu trữ cấu hình thiết bị, trình duyệt chọn thư mục trực quan trên máy và luồng đổi đường dẫn thư mục đồng bộ (với 2 chế độ xử lý dữ liệu cũ).
+> **Mục tiêu giai đoạn**: Dựng bộ khung dự án Monorepo (`pnpm`) cho cả 4 gói (`shared`, `desktop-agent`, `web-ui`, `mobile-app`), xây dựng hệ thống lưu trữ cấu hình thiết bị, trình duyệt chọn thư mục trực quan trên máy và luồng đổi đường dẫn thư mục đồng bộ (với 2 chế độ xử lý dữ liệu cũ).
 
 ---
 
@@ -15,13 +15,14 @@
   - `tsconfig.base.json`: cấu hình TypeScript chuẩn (`ES2022`, `strict: true`, `moduleResolution: bundler/node`).
   - `packages/shared/package.json` & `packages/shared/tsconfig.json`.
   - `packages/desktop-agent/package.json` & `packages/desktop-agent/tsconfig.json`.
-  - `packages/web-ui/package.json`, `packages/web-ui/tsconfig.json`, `packages/web-ui/vite.config.ts`, `packages/web-ui/capacitor.config.ts`.
+  - `packages/web-ui/package.json`, `packages/web-ui/tsconfig.json`, `packages/web-ui/vite.config.ts`.
+  - `packages/mobile-app/package.json`, `packages/mobile-app/tsconfig.json`, `packages/mobile-app/app.json` (React Native / Expo cho Android).
 - **Checklist thực hiện**:
   - [x] Tạo `pnpm-workspace.yaml` và `package.json` ở thư mục gốc.
   - [x] Tạo `tsconfig.base.json` dùng chung cho toàn dự án.
   - [x] Khởi tạo gói `@foldersync/shared` (chứa types và bộ xử lý `list-file.md`).
   - [x] Khởi tạo gói `@foldersync/desktop-agent` (Node.js service cho Linux/Windows).
-  - [x] Khởi tạo gói `@foldersync/web-ui` (React + Vite + Tailwind CSS + cấu hình Capacitor cho Android).
+  - [x] Khởi tạo gói `@foldersync/web-ui` (React + Vite + Tailwind CSS cho PC) và `@foldersync/mobile-app` (React Native / Expo cho Android).
   - [x] Chạy `pnpm install` và kiểm tra liên kết workspace thành công.
 
 ---

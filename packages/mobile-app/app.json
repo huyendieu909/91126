@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "FolderSync",
+    "slug": "foldersync",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "android": {
+      "package": "com.foldersync.app",
+      "permissions": [
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "INTERNET"
+      ]
+    }
+  }
+}
