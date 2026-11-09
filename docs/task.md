@@ -13,10 +13,13 @@
 - [x] Thêm SSH Public Key lên GitHub và kết nối remote repository (`git@github.com:huyendieu909/91126.git`)
 
 ## Giai đoạn 2: Khởi tạo Monorepo & Quản lý cấu hình (`ConfigService`)
-- [ ] Khởi tạo `pnpm` workspace gồm `packages/shared`, `packages/desktop-agent`, `packages/web-ui` (kèm cấu hình Capacitor cho `android`)
-- [ ] Xây dựng `ConfigService`: lưu trữ `deviceId`, `deviceName`, `syncFolderPath`, thông tin phiên đăng nhập `googleAuth`, và cấu hình `telegramBot` (`botToken`, `chatId`, `enabled`)
-- [ ] Xây dựng API duyệt chọn thư mục trên máy (Folder Browser API cho Linux/Windows + Capacitor Filesystem Picker cho Android)
-- [ ] Cài đặt luồng đổi thư mục đồng bộ với 2 chế độ: **(1) Chỉ trỏ sang thư mục mới** hoặc **(2) Copy toàn bộ dữ liệu từ thư mục cũ sang thư mục mới**
+> 📄 **Tài liệu chi tiết giai đoạn này**: [docs/phase-2-setup-and-config.md](./phase-2-setup-and-config.md)
+
+- [x] **Task 2.1**: Khởi tạo `pnpm` workspace (`packages/shared`, `packages/desktop-agent`, `packages/web-ui`) và cấu hình TypeScript
+- [x] **Task 2.2**: Định nghĩa kiểu dữ liệu dùng chung (`AppConfig`, `SwitchFolderMode`, `FileIndexEntry`) trong `@foldersync/shared`
+- [x] **Task 2.3**: Xây dựng `ConfigService` (lưu/đọc cấu hình nguyên tử, kiểm tra trạng thái lần đầu mở app `isFirstRun`)
+- [x] **Task 2.4**: Xây dựng `FolderService` (duyệt cây thư mục Linux/Windows và đổi thư mục đồng bộ với 2 chế độ `POINT_ONLY` / `COPY_EXISTING`)
+- [x] **Task 2.5**: Xây dựng REST API cấu hình & viết Unit/Integration Test kiểm chứng toàn bộ Giai đoạn 2
 
 ## Giai đoạn 3: Bộ theo dõi thư mục & Bộ sinh file chỉ mục (`list-file.md`)
 - [ ] Xây dựng `ListFileParser` & `ListFileGenerator` (trong `packages/shared`): đọc và xuất file `list-file.md` chuẩn Markdown Table (kèm metadata `relativePath`, `sha256`, `size`, `mtime`, `status`, `updatedBy`, `driveFileId`)
