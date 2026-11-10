@@ -3,7 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { URL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { serializeListFile, type SwitchFolderMode } from '@foldersync/shared';
+import {
+  serializeListFile,
+  type ExistingDataStrategy,
+  type SwitchFolderMode,
+} from '@foldersync/shared';
 import { ConfigService } from './services/config-service.js';
 import { FolderService } from './services/folder-service.js';
 import { FileIndexer } from './services/file-indexer.js';
@@ -114,10 +118,19 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
 
       // POST /api/config/switch-folder
       if (req.method === 'POST' && pathname === '/api/config/switch-folder') {
-        const body = await readJsonBody<{ newPath: string; mode?: SwitchFolderMode }>(req);
+        const body = await readJsonBody<{
+          newPath: string;
+          mode?: SwitchFolderMode;
+          existingDataStrategy?: ExistingDataStrategy;
+        }>(req);
         const mode: SwitchFolderMode =
           body.mode === 'COPY_EXISTING' ? 'COPY_EXISTING' : 'POINT_ONLY';
-        const result = await ctx.folderService.switchSyncFolder(body.newPath, mode);
+        const strategy: ExistingDataStrategy =
+          body.existingDataStrategy === 'ISOLATE_BACKUP' ||
+          body.existingDataStrategy === 'CREATE_SUBFOLDER'
+            ? body.existingDataStrategy
+            : 'MERGE_ALL';
+        const result = await ctx.folderService.switchSyncFolder(body.newPath, mode, strategy);
         const config = await ctx.configService.getPublicConfig();
         sendJson(res, 200, { result, config });
         return;
@@ -215,6 +228,35 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
         await oauth.disconnect();
         const publicConfig = await ctx.configService.getPublicConfig();
         sendJson(res, 200, publicConfig);
+        return;
+      }
+
+      // GET /api/auth/mobile-bridge (One-tap sync of Google OAuth refreshToken & Telegram config to Mobile)
+      if (req.method === 'GET' && pathname === '/api/auth/mobile-bridge') {
+        try {
+          await oauth.getValidAccessToken();
+        } catch {
+          // Ignore if not logged in yet
+        }
+        const cfg = await ctx.configService.loadConfig();
+        sendJson(res, 200, {
+          googleAuth: {
+            clientId: cfg.googleAuth.clientId || process.env.GOOGLE_CLIENT_ID || null,
+            clientSecret: cfg.googleAuth.clientSecret || process.env.GOOGLE_CLIENT_SECRET || null,
+            email: cfg.googleAuth.email,
+            displayName: cfg.googleAuth.displayName,
+            accessToken: cfg.googleAuth.accessToken,
+            refreshToken: cfg.googleAuth.refreshToken,
+            expiryDate: cfg.googleAuth.expiryDate,
+            driveRootFolderId: cfg.googleAuth.driveRootFolderId,
+            listFileDriveId: cfg.googleAuth.listFileDriveId,
+          },
+          telegramBot: {
+            enabled: cfg.telegramBot.enabled,
+            botToken: cfg.telegramBot.botToken,
+            chatId: cfg.telegramBot.chatId,
+          },
+        });
         return;
       }
 

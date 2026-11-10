@@ -1,8 +1,47 @@
 import fs from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import type { AppConfig, PublicAppConfig } from '@foldersync/shared';
+
+function loadWorkspaceEnv(): void {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(process.cwd(), '.env'),
+    path.resolve(__dirname, '../../../../.env'),
+  ];
+
+  for (const envPath of candidates) {
+    if (!existsSync(envPath)) continue;
+    try {
+      const content = readFileSync(envPath, 'utf-8');
+      for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        const eqIdx = line.indexOf('=');
+        if (eqIdx === -1) continue;
+        const key = line.slice(0, eqIdx).trim();
+        let value = line.slice(eqIdx + 1).trim();
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
+          value = value.slice(1, -1);
+        }
+        if (key && process.env[key] === undefined) {
+          process.env[key] = value;
+        }
+      }
+      break;
+    } catch {
+      // Ignore env read errors
+    }
+  }
+}
+
+loadWorkspaceEnv();
 
 export class ConfigService {
   private readonly configPath: string;
@@ -61,6 +100,8 @@ export class ConfigService {
         googleAuth: {
           ...defaults.googleAuth,
           ...(parsed.googleAuth ?? {}),
+          clientId: parsed.googleAuth?.clientId || defaults.googleAuth.clientId,
+          clientSecret: parsed.googleAuth?.clientSecret || defaults.googleAuth.clientSecret,
         },
         telegramBot: {
           ...defaults.telegramBot,

@@ -23,7 +23,11 @@ export class FileIndexer {
     if (!normalized) return true;
 
     const segments = normalized.split('/');
-    if (segments.includes('.sync_tmp') || segments.includes('.git')) {
+    if (
+      segments.includes('.sync_tmp') ||
+      segments.includes('.unsynced_local_backup') ||
+      segments.includes('.git')
+    ) {
       return true;
     }
 
@@ -32,7 +36,11 @@ export class FileIndexer {
       return true;
     }
 
-    if (base.startsWith('.sync_tmp') || base.endsWith('.sync_tmp')) {
+    if (
+      base.startsWith('.sync_tmp') ||
+      base.endsWith('.sync_tmp') ||
+      base.startsWith('.unsynced_local_backup')
+    ) {
       return true;
     }
 
@@ -149,6 +157,7 @@ export class FileIndexer {
         status: 'ACTIVE',
         updatedBy: deviceName,
         driveFileId: '-',
+        syncedDevices: [deviceName],
       });
     }
 
@@ -158,6 +167,10 @@ export class FileIndexer {
       if (seenOnDisk.has(relPath)) continue;
 
       if (prev.status === 'ACTIVE') {
+        if (prev.syncedDevices && !prev.syncedDevices.includes(deviceName)) {
+          // File chưa được tải về máy này (đang chờ trạm trung chuyển đẩy lại) -> không đánh dấu xóa
+          continue;
+        }
         changed = true;
         nextEntries.push({
           relativePath: relPath,
