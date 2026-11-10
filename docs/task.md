@@ -24,10 +24,10 @@
 ## Giai đoạn 3: Bộ theo dõi thư mục & Bộ sinh file chỉ mục (`list-file.md`)
 > 📄 **Tài liệu chi tiết giai đoạn này**: [docs/phase-3-watcher-and-list-file.md](./phase-3-watcher-and-list-file.md)
 
-- [ ] **Task 3.1**: Xây dựng `ListFileCodec` (`serializeListFile`, `parseListFile`, `diffListFiles`) trong `@foldersync/shared`
-- [ ] **Task 3.2**: Xây dựng `FileIndexer` (quét thư mục, tính `SHA-256` stream, cập nhật `list-file.md` và tạo file `.conflict-<tên_máy>`)
-- [ ] **Task 3.3**: Xây dựng `FolderWatcher` (`chokidar` + Debounce 400ms + Anti-Loop lock + tự chuyển vùng khi đổi thư mục)
-- [ ] **Task 3.4**: Viết bộ kiểm thử tự động `list-file-codec.test.ts` và `watcher-and-indexer.test.ts` cho Giai đoạn 3
+- [x] **Task 3.1**: Xây dựng `ListFileCodec` (`serializeListFile`, `parseListFile`, `diffListFiles`) trong `@foldersync/shared`
+- [x] **Task 3.2**: Xây dựng `FileIndexer` (quét thư mục, tính `SHA-256` stream, cập nhật `list-file.md` và tạo file `.conflict-<tên_máy>`)
+- [x] **Task 3.3**: Xây dựng `FolderWatcher` (`chokidar` + Debounce 400ms + Anti-Loop lock + tự chuyển vùng khi đổi thư mục)
+- [x] **Task 3.4**: Viết bộ kiểm thử tự động `list-file-codec.test.ts` và `watcher-and-indexer.test.ts` cho Giai đoạn 3
 
 ## Giai đoạn 4: Tích hợp Google OAuth2 / Drive API & Telegram Trigger
 - [ ] Xây dựng `GoogleDriveService`: xác thực OAuth2 bằng tài khoản Google, tạo thư mục đồng bộ trên Drive, tải lên/tải xuống `list-file.md` và các file thay đổi theo `driveFileId`

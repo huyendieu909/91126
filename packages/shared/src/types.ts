@@ -94,3 +94,19 @@ export interface SwitchFolderResult {
   mode: SwitchFolderMode;
   copiedFilesCount: number;
 }
+
+export interface ConflictPair {
+  relativePath: string;
+  localEntry: FileIndexEntry;
+  remoteEntry: FileIndexEntry;
+  /** Bản có modifiedAt mới hơn được giữ làm file chính */
+  winner: 'LOCAL' | 'REMOTE';
+}
+
+export interface ListFileDiffResult {
+  toDownload: FileIndexEntry[];
+  toUpload: FileIndexEntry[];
+  toDeleteLocally: FileIndexEntry[];
+  toMarkDeletedRemotely: FileIndexEntry[];
+  conflicts: ConflictPair[];
+}

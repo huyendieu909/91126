@@ -1,17 +1,23 @@
 import http from 'node:http';
 import { URL } from 'node:url';
-import type { SwitchFolderMode } from '@foldersync/shared';
+import { serializeListFile, type SwitchFolderMode } from '@foldersync/shared';
 import { ConfigService } from './services/config-service.js';
 import { FolderService } from './services/folder-service.js';
+import { FileIndexer } from './services/file-indexer.js';
+import { FolderWatcher } from './services/folder-watcher.js';
 
 export interface AgentServerContext {
   configService: ConfigService;
   folderService: FolderService;
+  fileIndexer?: FileIndexer;
+  folderWatcher?: FolderWatcher;
 }
 
 export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
+  const indexer = ctx.fileIndexer ?? new FileIndexer();
+
   return http.createServer(async (req, res) => {
-    // Enable CORS for local Web UI & Capacitor
+    // Enable CORS for local Web UI & Mobile
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -87,6 +93,44 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
         const result = await ctx.folderService.switchSyncFolder(body.newPath, mode);
         const config = await ctx.configService.getPublicConfig();
         sendJson(res, 200, { result, config });
+        return;
+      }
+
+      // GET /api/index
+      if (req.method === 'GET' && pathname === '/api/index') {
+        const cfg = await ctx.configService.loadConfig();
+        if (!cfg.syncFolderPath) {
+          sendJson(res, 200, {
+            configured: false,
+            document: null,
+            markdown: '',
+          });
+          return;
+        }
+        const doc = await indexer.readLocalListFile(cfg.syncFolderPath);
+        sendJson(res, 200, {
+          configured: true,
+          document: doc,
+          markdown: serializeListFile(doc),
+        });
+        return;
+      }
+
+      // POST /api/index/rescan
+      if (req.method === 'POST' && pathname === '/api/index/rescan') {
+        const cfg = await ctx.configService.loadConfig();
+        if (!cfg.syncFolderPath) {
+          sendJson(res, 400, { error: 'Chưa chọn thư mục đồng bộ.' });
+          return;
+        }
+        const doc = ctx.folderWatcher
+          ? await ctx.folderWatcher.triggerScanNow()
+          : (await indexer.scanAndSyncLocalListFile(cfg.syncFolderPath, cfg.deviceName)).doc;
+
+        sendJson(res, 200, {
+          document: doc,
+          markdown: serializeListFile(doc),
+        });
         return;
       }
 
