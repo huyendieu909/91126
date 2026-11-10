@@ -1,5 +1,7 @@
 export type SwitchFolderMode = 'POINT_ONLY' | 'COPY_EXISTING';
 
+export type ExistingDataStrategy = 'MERGE_ALL' | 'ISOLATE_BACKUP' | 'CREATE_SUBFOLDER';
+
 export type FileSyncStatus = 'ACTIVE' | 'DELETED';
 
 export interface FileIndexEntry {
@@ -15,8 +17,12 @@ export interface FileIndexEntry {
   status: FileSyncStatus;
   /** Tên thiết bị cập nhật cuối cùng */
   updatedBy: string;
-  /** ID của file trên Google Drive để tải trực tiếp (hoặc '-' nếu chưa có / đã xóa) */
+  /** ID của file trên Google Drive để tải trực tiếp (hoặc '-' nếu đã tự hủy sau khi đồng bộ xong) */
   driveFileId: string;
+  /** Danh sách các thiết bị đã có bản sao mã SHA-256 này trên ổ cứng nội bộ */
+  syncedDevices?: string[];
+  /** Cờ báo có thiết bị mới/thiếu file yêu cầu máy đang giữ file đẩy tạm lại lên trạm trung chuyển */
+  requestUpload?: boolean;
 }
 
 export interface ListFileDocument {
@@ -26,6 +32,8 @@ export interface ListFileDocument {
   updatedByDevice: string;
   /** Số thứ tự phiên bản của list-file.md */
   revision: number;
+  /** Danh sách các thiết bị đã tham gia đồng bộ trong nhóm */
+  knownDevices?: string[];
   /** Danh sách các bản ghi file */
   entries: FileIndexEntry[];
 }
@@ -86,11 +94,14 @@ export interface DirectoryBrowseResult {
   parentPath: string | null;
   roots: string[];
   directories: DirectoryEntry[];
+  /** Số lượng file dữ liệu đang có sẵn trong thư mục currentPath */
+  existingFilesCount?: number;
 }
 
 export interface SwitchFolderRequest {
   newPath: string;
   mode: SwitchFolderMode;
+  existingDataStrategy?: ExistingDataStrategy;
 }
 
 export interface SwitchFolderResult {
@@ -98,6 +109,9 @@ export interface SwitchFolderResult {
   newPath: string;
   mode: SwitchFolderMode;
   copiedFilesCount: number;
+  existingDataStrategy?: ExistingDataStrategy;
+  isolatedFilesCount?: number;
+  isolatedBackupPath?: string | null;
 }
 
 export interface ConflictPair {

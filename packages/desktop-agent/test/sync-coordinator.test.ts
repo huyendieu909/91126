@@ -173,6 +173,13 @@ describe('Phase 4: Multi-Device SyncCoordinator (list-file.md + Cloud + Telegram
       'Hello v2 from Windows',
     );
     await expect(fs.stat(path.join(nodeA.syncDir, 'notes', 'todo.md'))).rejects.toThrow();
+
+    // 5. Verify that once all knownDevices (Linux-PC & Windows-PC) have deleted notes/todo.md,
+    // the DELETED row is completely garbage-collected from list-file.md!
+    const remoteDocAfterDelete = await sharedCloud.readRemoteListFile();
+    expect(
+      remoteDocAfterDelete?.entries.find((e) => e.relativePath === 'notes/todo.md'),
+    ).toBeUndefined();
   });
 
   it('resolves simultaneous edits safely by keeping newest file and saving .conflict-<device> backup', async () => {
@@ -238,5 +245,51 @@ describe('Phase 4: Multi-Device SyncCoordinator (list-file.md + Cloud + Telegram
       'utf-8',
     );
     expect(syncedContent).toBe('Triggered via Telegram!');
+  });
+
+  it('acts as an Ephemeral Relay: auto-purges files from Google Drive once all devices sync, and re-uploads on demand for new devices', async () => {
+    // 1. Node A creates a file and syncs -> temporarily stored on cloud relay
+    await fs.writeFile(path.join(nodeA.syncDir, 'relay-doc.txt'), 'Ephemeral relay data', 'utf-8');
+    await nodeA.coordinator.syncNow('A_INITIAL_UPLOAD');
+    expect(sharedCloud.getStoredFileCount()).toBe(1);
+
+    // 2. Node B syncs and downloads the file -> both knownDevices (Linux-PC & Windows-PC) now have the file!
+    // The physical file must be automatically purged from Google Drive (0 files stored in cloud)!
+    await nodeB.coordinator.syncNow('B_DOWNLOAD_AND_PURGE');
+    expect(await fs.readFile(path.join(nodeB.syncDir, 'relay-doc.txt'), 'utf-8')).toBe(
+      'Ephemeral relay data',
+    );
+    expect(sharedCloud.getStoredFileCount()).toBe(0);
+
+    const remoteDocAfterPurge = await sharedCloud.readRemoteListFile();
+    expect(remoteDocAfterPurge?.entries[0].driveFileId).toBe('-');
+    expect(remoteDocAfterPurge?.entries[0].syncedDevices).toEqual(['Linux-PC', 'Windows-PC']);
+
+    // 3. A brand-new 3rd device (Node C) joins later when Google Drive has 0 files stored
+    const nodeC = await createNode('Android-Phone', 'node-c', async () => {
+      return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+    });
+
+    try {
+      // First sync on Node C notices driveFileId === '-' and requests re-upload (@NEED_UPLOAD)
+      await nodeC.coordinator.syncNow('C_REQUEST_REUPLOAD');
+      const docWithRequest = await sharedCloud.readRemoteListFile();
+      expect(docWithRequest?.entries[0].requestUpload).toBe(true);
+
+      // Node A syncs -> sees requestUpload, pushes file back to relay temporarily (1 file in cloud)
+      await nodeA.coordinator.syncNow('A_FULFILL_REUPLOAD');
+      expect(sharedCloud.getStoredFileCount()).toBe(1);
+
+      // Node C syncs -> downloads the file and automatically purges the relay back to 0 files!
+      await nodeC.coordinator.syncNow('C_DOWNLOAD_AND_PURGE');
+      expect(await fs.readFile(path.join(nodeC.syncDir, 'relay-doc.txt'), 'utf-8')).toBe(
+        'Ephemeral relay data',
+      );
+      expect(sharedCloud.getStoredFileCount()).toBe(0);
+    } finally {
+      nodeC.telegramService.stop();
+      nodeC.coordinator.dispose();
+      await nodeC.folderWatcher.stop();
+    }
   });
 });

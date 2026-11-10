@@ -29,15 +29,20 @@ export function serializeListFile(doc: ListFileDocument): string {
     a.relativePath.localeCompare(b.relativePath),
   );
 
+  const knownDevicesList = Array.from(
+    new Set((doc.knownDevices ?? []).map((d) => d.trim()).filter(Boolean)),
+  ).sort((a, b) => a.localeCompare(b));
+
   const lines: string[] = [
     '# 📋 Danh Sách File Đồng Bộ (FolderSync Index)',
     '',
     `- **Cập nhật lần cuối**: \`${doc.lastUpdatedAt}\``,
     `- **Thiết bị cập nhật**: \`${escapeCell(doc.updatedByDevice)}\``,
     `- **Phiên bản chỉ mục (Revision)**: \`${doc.revision}\``,
+    `- **Thiết bị tham gia**: \`${escapeCell(knownDevicesList.join(', ') || doc.updatedByDevice || 'None')}\``,
     '',
-    '| Đường dẫn file (`Path`) | Mã băm (`SHA-256`) | Dung lượng (`Bytes`) | Thời gian sửa (`ModifiedAt`) | Trạng thái (`Status`) | Thiết bị (`UpdatedBy`) | Drive ID (`DriveFileId`) |',
-    '| :--- | :--- | ---: | :--- | :---: | :--- | :--- |',
+    '| Đường dẫn file (`Path`) | Mã băm (`SHA-256`) | Dung lượng (`Bytes`) | Thời gian sửa (`ModifiedAt`) | Trạng thái (`Status`) | Thiết bị (`UpdatedBy`) | Drive ID (`DriveFileId`) | Đã nhận (`SyncedDevices`) |',
+    '| :--- | :--- | ---: | :--- | :---: | :--- | :--- | :--- |',
   ];
 
   for (const entry of sortedEntries) {
@@ -48,9 +53,17 @@ export function serializeListFile(doc: ListFileDocument): string {
     const statusCell = `\`${entry.status}\``;
     const updatedByCell = `\`${escapeCell(entry.updatedBy || '-')}\``;
     const driveIdCell = `\`${escapeCell(entry.driveFileId || '-')}\``;
+    const syncedSet = Array.from(
+      new Set((entry.syncedDevices ?? []).map((d) => d.trim()).filter(Boolean)),
+    ).sort((a, b) => a.localeCompare(b));
+    let syncedStr = syncedSet.length > 0 ? syncedSet.join(', ') : '-';
+    if (entry.requestUpload) {
+      syncedStr = `${syncedStr}@NEED_UPLOAD`;
+    }
+    const syncedDevicesCell = `\`${escapeCell(syncedStr)}\``;
 
     lines.push(
-      `| ${pathCell} | ${hashCell} | ${sizeCell} | ${mtimeCell} | ${statusCell} | ${updatedByCell} | ${driveIdCell} |`,
+      `| ${pathCell} | ${hashCell} | ${sizeCell} | ${mtimeCell} | ${statusCell} | ${updatedByCell} | ${driveIdCell} | ${syncedDevicesCell} |`,
     );
   }
 
@@ -62,6 +75,7 @@ export function parseListFile(markdown: string): ListFileDocument {
   let lastUpdatedAt = new Date(0).toISOString();
   let updatedByDevice = 'Unknown';
   let revision = 0;
+  let knownDevices: string[] = [];
   const entries: FileIndexEntry[] = [];
 
   const lines = markdown.split(/\r?\n/);
@@ -87,6 +101,18 @@ export function parseListFile(markdown: string): ListFileDocument {
       const parsedRev = Number.parseInt(stripBackticks(val), 10);
       if (!Number.isNaN(parsedRev)) {
         revision = parsedRev;
+      }
+      continue;
+    }
+
+    if (line.startsWith('- **Thiết bị tham gia**:')) {
+      const val = line.split(':').slice(1).join(':').trim();
+      const rawDevices = unescapeCell(stripBackticks(val));
+      if (rawDevices && rawDevices !== 'None' && rawDevices !== '-') {
+        knownDevices = rawDevices
+          .split(',')
+          .map((d) => d.trim())
+          .filter(Boolean);
       }
       continue;
     }
@@ -118,6 +144,23 @@ export function parseListFile(markdown: string): ListFileDocument {
       const updatedBy = unescapeCell(stripBackticks(cells[5]));
       const driveFileId = unescapeCell(stripBackticks(cells[6]));
 
+      let syncedDevices: string[] | undefined;
+      let requestUpload = false;
+
+      if (cells.length >= 8) {
+        let rawSynced = unescapeCell(stripBackticks(cells[7]));
+        if (rawSynced.endsWith('@NEED_UPLOAD')) {
+          requestUpload = true;
+          rawSynced = rawSynced.slice(0, -'@NEED_UPLOAD'.length);
+        }
+        if (rawSynced && rawSynced !== '-') {
+          syncedDevices = rawSynced
+            .split(',')
+            .map((d) => d.trim())
+            .filter(Boolean);
+        }
+      }
+
       entries.push({
         relativePath,
         sha256,
@@ -126,6 +169,8 @@ export function parseListFile(markdown: string): ListFileDocument {
         status,
         updatedBy,
         driveFileId,
+        ...(syncedDevices ? { syncedDevices } : {}),
+        ...(requestUpload ? { requestUpload: true } : {}),
       });
     }
   }
@@ -134,6 +179,7 @@ export function parseListFile(markdown: string): ListFileDocument {
     lastUpdatedAt,
     updatedByDevice,
     revision,
+    ...(knownDevices.length > 0 ? { knownDevices } : {}),
     entries,
   };
 }
@@ -193,13 +239,11 @@ export function diffListFiles(
 
     // Case 3: Remote marked DELETED, Local is ACTIVE
     if (remote.status === 'DELETED' && local.status === 'ACTIVE') {
-      const remoteTime = Date.parse(remote.modifiedAt) || 0;
-      const localTime = Date.parse(local.modifiedAt) || 0;
-      // If local wasn't modified after the deletion (or matches baseHash), delete locally
-      if ((baseHash && local.sha256 === baseHash) || remoteTime >= localTime) {
+      // Chỉ xóa file nội bộ nếu máy này thực sự từng đồng bộ file đó trước đây (có baseHash) và chưa sửa đổi gì thêm
+      if (baseHash && local.sha256 === baseHash) {
         toDeleteLocally.push(remote);
       } else {
-        // Local was modified more recently than the remote deletion -> re-upload local
+        // File được sửa mới hơn lệnh xóa HOẶC là file có sẵn trong thư mục mới chọn (!baseHash) -> Bảo toàn & đẩy lên
         toUpload.push(local);
       }
       continue;

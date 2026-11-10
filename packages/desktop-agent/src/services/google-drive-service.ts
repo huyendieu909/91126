@@ -35,7 +35,7 @@ export class GoogleOAuthService {
 
     if (!clientId || !clientSecret) {
       throw new Error(
-        'Chưa cấu hình Google OAuth Client ID & Client Secret. Vui lòng nhập trên giao diện hoặc biến môi trường GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.',
+        'Chưa cấu hình GOOGLE_CLIENT_ID và GOOGLE_CLIENT_SECRET trong file .env ở thư mục gốc của dự án.',
       );
     }
 

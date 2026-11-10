@@ -196,15 +196,54 @@ export class SyncCoordinator extends EventEmitter {
       lastUpdatedAt: new Date(0).toISOString(),
       updatedByDevice: 'None',
       revision: 0,
+      knownDevices: [],
       entries: [],
     };
+
+    const knownDevicesSet = new Set<string>(remoteDoc.knownDevices ?? []);
+    if (
+      remoteDoc.updatedByDevice &&
+      remoteDoc.updatedByDevice !== 'None' &&
+      remoteDoc.updatedByDevice !== 'Unknown'
+    ) {
+      knownDevicesSet.add(remoteDoc.updatedByDevice);
+    }
+    const newDeviceJoined = !knownDevicesSet.has(deviceName);
+    knownDevicesSet.add(deviceName);
+    const knownDevices = [...knownDevicesSet].sort((a, b) => a.localeCompare(b));
+
+    const localActiveMap = new Map<string, FileIndexEntry>();
+    for (const entry of localDoc.entries) {
+      if (entry.status === 'ACTIVE') {
+        localActiveMap.set(entry.relativePath, entry);
+      }
+    }
 
     // 3. Diff local entries vs remote list-file.md using 3-way baselineHashes
     const diff = diffListFiles(localDoc.entries, remoteDoc, baselineHashes);
 
     const finalEntriesMap = new Map<string, FileIndexEntry>();
     for (const entry of remoteDoc.entries) {
-      finalEntriesMap.set(entry.relativePath, entry);
+      const localMatch = localActiveMap.get(entry.relativePath);
+      if (entry.status === 'ACTIVE' && localMatch && localMatch.sha256 === entry.sha256) {
+        const mergedSynced = Array.from(
+          new Set([...(entry.syncedDevices ?? [entry.updatedBy]), deviceName]),
+        );
+        finalEntriesMap.set(entry.relativePath, {
+          ...entry,
+          syncedDevices: mergedSynced,
+        });
+      } else if (entry.status === 'DELETED' && !localMatch) {
+        const mergedDelSynced = Array.from(
+          new Set([...(entry.syncedDevices ?? [entry.updatedBy]), deviceName]),
+        );
+        finalEntriesMap.set(entry.relativePath, {
+          ...entry,
+          syncedDevices: mergedDelSynced,
+        });
+      } else {
+        finalEntriesMap.set(entry.relativePath, entry);
+      }
     }
 
     const uploadedPaths: string[] = [];
@@ -212,6 +251,8 @@ export class SyncCoordinator extends EventEmitter {
     const deletedLocallyPaths: string[] = [];
     const markedDeletedRemotelyPaths: string[] = [];
     const conflictPaths: string[] = [];
+    let requestedReuploadCount = 0;
+    let relayPurgedCount = 0;
 
     // 4A. Resolve Conflicts safely (.conflict-<deviceName>)
     for (const conflict of diff.conflicts) {
@@ -247,8 +288,16 @@ export class SyncCoordinator extends EventEmitter {
           status: 'ACTIVE',
           updatedBy: deviceName,
           driveFileId: conflictDriveId,
+          syncedDevices: [deviceName],
+          requestUpload: false,
         });
-        finalEntriesMap.set(relativePath, remoteEntry);
+        finalEntriesMap.set(relativePath, {
+          ...remoteEntry,
+          syncedDevices: Array.from(
+            new Set([...(remoteEntry.syncedDevices ?? [remoteEntry.updatedBy]), deviceName]),
+          ),
+          requestUpload: false,
+        });
         downloadedPaths.push(relativePath);
         uploadedPaths.push(conflictRelPath);
 
@@ -285,6 +334,8 @@ export class SyncCoordinator extends EventEmitter {
         finalEntriesMap.set(conflictRelPath, {
           ...remoteConflictEntry,
           driveFileId: conflictDriveId,
+          syncedDevices: [deviceName],
+          requestUpload: false,
         });
 
         // Upload winning local version as main file
@@ -298,6 +349,8 @@ export class SyncCoordinator extends EventEmitter {
           ...localEntry,
           updatedBy: deviceName,
           driveFileId: mainDriveId,
+          syncedDevices: [deviceName],
+          requestUpload: false,
         });
 
         uploadedPaths.push(relativePath, conflictRelPath);
@@ -310,12 +363,37 @@ export class SyncCoordinator extends EventEmitter {
       }
     }
 
-    // 4B. Download files missing or updated on remote
+    // 4B. Download files missing or updated on remote (or request re-upload if relay already purged)
     for (const remoteEntry of diff.toDownload) {
+      if (!remoteEntry.driveFileId || remoteEntry.driveFileId === '-') {
+        const filteredSynced = (remoteEntry.syncedDevices ?? [remoteEntry.updatedBy]).filter(
+          (d) => d !== deviceName,
+        );
+        finalEntriesMap.set(remoteEntry.relativePath, {
+          ...remoteEntry,
+          syncedDevices: filteredSynced,
+          requestUpload: true,
+        });
+        requestedReuploadCount += 1;
+        this.appendLog(
+          'INFO',
+          'RELAY_REQUEST_UPLOAD',
+          `File "${remoteEntry.relativePath}" đã tự hủy trên trạm trung chuyển. Đã gửi yêu cầu máy gốc đẩy lại tạm thời.`,
+        );
+        continue;
+      }
+
       await this.folderWatcher.withWriteLock(remoteEntry.relativePath, async () => {
         await this.downloadEntryAtomically(syncFolderPath, remoteEntry);
       });
-      finalEntriesMap.set(remoteEntry.relativePath, remoteEntry);
+      const nextSynced = Array.from(
+        new Set([...(remoteEntry.syncedDevices ?? [remoteEntry.updatedBy]), deviceName]),
+      );
+      finalEntriesMap.set(remoteEntry.relativePath, {
+        ...remoteEntry,
+        syncedDevices: nextSynced,
+        requestUpload: false,
+      });
       downloadedPaths.push(remoteEntry.relativePath);
       this.appendLog(
         'SUCCESS',
@@ -330,7 +408,13 @@ export class SyncCoordinator extends EventEmitter {
       await this.folderWatcher.withWriteLock(remoteDel.relativePath, async () => {
         await fs.rm(targetFullPath, { force: true });
       });
-      finalEntriesMap.set(remoteDel.relativePath, remoteDel);
+      const nextDelSynced = Array.from(
+        new Set([...(remoteDel.syncedDevices ?? [remoteDel.updatedBy]), deviceName]),
+      );
+      finalEntriesMap.set(remoteDel.relativePath, {
+        ...remoteDel,
+        syncedDevices: nextDelSynced,
+      });
       deletedLocallyPaths.push(remoteDel.relativePath);
       this.appendLog(
         'INFO',
@@ -353,13 +437,48 @@ export class SyncCoordinator extends EventEmitter {
         ...localEntry,
         updatedBy: deviceName,
         driveFileId,
+        syncedDevices: [deviceName],
+        requestUpload: false,
       };
       finalEntriesMap.set(localEntry.relativePath, updatedEntry);
       uploadedPaths.push(localEntry.relativePath);
       this.appendLog('SUCCESS', 'UPLOAD', `Đã đẩy lên "${localEntry.relativePath}".`);
     }
 
-    // 4E. Propagate local deletions to remote list-file.md
+    // 4E. Fulfill any relay re-upload requests from new/switched devices if this device holds the file locally
+    for (const entry of finalEntriesMap.values()) {
+      if (
+        entry.status === 'ACTIVE' &&
+        (!entry.driveFileId || entry.driveFileId === '-') &&
+        entry.requestUpload
+      ) {
+        const localMatch = localActiveMap.get(entry.relativePath);
+        if (localMatch && localMatch.sha256 === entry.sha256) {
+          const localFullPath = path.join(syncFolderPath, ...entry.relativePath.split('/'));
+          const reuploadedDriveId = await this.cloudProvider.uploadFile(
+            localFullPath,
+            entry.relativePath,
+          );
+          const mergedSynced = Array.from(
+            new Set([...(entry.syncedDevices ?? []), deviceName]),
+          );
+          finalEntriesMap.set(entry.relativePath, {
+            ...entry,
+            driveFileId: reuploadedDriveId,
+            syncedDevices: mergedSynced,
+            requestUpload: false,
+          });
+          uploadedPaths.push(entry.relativePath);
+          this.appendLog(
+            'INFO',
+            'RELAY_REUPLOAD',
+            `Đã đẩy tạm lại "${entry.relativePath}" lên trạm trung chuyển cho thiết bị mới.`,
+          );
+        }
+      }
+    }
+
+    // 4F. Propagate local deletions to remote list-file.md
     for (const localDel of diff.toMarkDeletedRemotely) {
       const prevRemote = finalEntriesMap.get(localDel.relativePath);
       if (prevRemote?.driveFileId && prevRemote.driveFileId !== '-') {
@@ -374,6 +493,8 @@ export class SyncCoordinator extends EventEmitter {
         status: 'DELETED',
         updatedBy: deviceName,
         driveFileId: '-',
+        syncedDevices: [deviceName],
+        requestUpload: false,
       };
       finalEntriesMap.set(localDel.relativePath, tombstone);
       markedDeletedRemotelyPaths.push(localDel.relativePath);
@@ -384,11 +505,62 @@ export class SyncCoordinator extends EventEmitter {
       );
     }
 
+    // 4G. Ephemeral Relay Auto-Purge & DELETED Tombstone Cleanup once all knownDevices (>= 2) have synced!
+    if (knownDevices.length >= 2) {
+      for (const entry of [...finalEntriesMap.values()]) {
+        const syncedList = entry.syncedDevices ?? [entry.updatedBy];
+        const allKnownSynced = knownDevices.every((dev) => syncedList.includes(dev));
+
+        if (!allKnownSynced) {
+          continue;
+        }
+
+        if (entry.status === 'DELETED') {
+          finalEntriesMap.delete(entry.relativePath);
+          relayPurgedCount += 1;
+          this.appendLog(
+            'INFO',
+            'TOMBSTONE_PURGED',
+            `🧹 Đã xóa hẳn dòng DELETED của "${entry.relativePath}" khỏi list-file.md (tất cả ${knownDevices.length} thiết bị đã xóa xong).`,
+          );
+          continue;
+        }
+
+        if (
+          entry.status === 'ACTIVE' &&
+          entry.driveFileId &&
+          entry.driveFileId !== '-' &&
+          !entry.requestUpload
+        ) {
+          await this.cloudProvider.deleteRemoteFile(entry.driveFileId);
+          finalEntriesMap.set(entry.relativePath, {
+            ...entry,
+            driveFileId: '-',
+            syncedDevices: syncedList,
+            requestUpload: false,
+          });
+          relayPurgedCount += 1;
+          this.appendLog(
+            'INFO',
+            'RELAY_PURGED',
+            `🧹 Trạm trung chuyển: Đã tự hủy bản tạm "${entry.relativePath}" trên Google Drive (tất cả ${knownDevices.length} thiết bị đã nhận đủ).`,
+          );
+        }
+      }
+    }
+
     // 5. Finalize list-file.md & baseline hashes
     const pushedChanges =
       uploadedPaths.length > 0 ||
       markedDeletedRemotelyPaths.length > 0 ||
-      conflictPaths.length > 0;
+      conflictPaths.length > 0 ||
+      requestedReuploadCount > 0;
+
+    const shouldWriteRemote =
+      pushedChanges ||
+      relayPurgedCount > 0 ||
+      newDeviceJoined ||
+      (!remoteExisting && finalEntriesMap.size > 0);
 
     const nowIso = new Date().toISOString();
     const nextRevision = pushedChanges ? remoteDoc.revision + 1 : remoteDoc.revision;
@@ -398,13 +570,14 @@ export class SyncCoordinator extends EventEmitter {
     );
 
     const finalDoc: ListFileDocument = {
-      lastUpdatedAt: pushedChanges ? nowIso : remoteDoc.lastUpdatedAt,
+      lastUpdatedAt: pushedChanges || relayPurgedCount > 0 ? nowIso : remoteDoc.lastUpdatedAt,
       updatedByDevice: pushedChanges ? deviceName : remoteDoc.updatedByDevice,
       revision: nextRevision,
+      knownDevices,
       entries: sortedEntries,
     };
 
-    if (pushedChanges || (!remoteExisting && sortedEntries.length > 0)) {
+    if (shouldWriteRemote) {
       await this.cloudProvider.writeRemoteListFile(finalDoc);
 
       if (this.telegramService && pushedChanges) {
@@ -422,7 +595,13 @@ export class SyncCoordinator extends EventEmitter {
 
     const nextBaseline: Record<string, string> = {};
     for (const entry of finalDoc.entries) {
-      if (entry.status === 'ACTIVE' && entry.sha256 && entry.sha256 !== '-') {
+      const hasFileLocally = !entry.syncedDevices || entry.syncedDevices.includes(deviceName);
+      if (
+        entry.status === 'ACTIVE' &&
+        entry.sha256 &&
+        entry.sha256 !== '-' &&
+        hasFileLocally
+      ) {
         nextBaseline[entry.relativePath] = entry.sha256;
       }
     }
