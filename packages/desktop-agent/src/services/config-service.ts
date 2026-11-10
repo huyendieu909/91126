@@ -26,12 +26,15 @@ export class ConfigService {
       syncFolderPath: null,
       lastSyncedRevision: 0,
       googleAuth: {
+        clientId: process.env.GOOGLE_CLIENT_ID || null,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET || null,
         email: null,
         displayName: null,
         accessToken: null,
         refreshToken: null,
         expiryDate: null,
         driveRootFolderId: null,
+        listFileDriveId: null,
       },
       telegramBot: {
         enabled: false,
@@ -114,6 +117,9 @@ export class ConfigService {
   public async getPublicConfig(): Promise<PublicAppConfig> {
     const cfg = await this.loadConfig();
     const isConfigured = Boolean(cfg.syncFolderPath && cfg.syncFolderPath.trim().length > 0);
+    const effectiveClientId = cfg.googleAuth.clientId || process.env.GOOGLE_CLIENT_ID || null;
+    const effectiveClientSecret =
+      cfg.googleAuth.clientSecret || process.env.GOOGLE_CLIENT_SECRET || null;
 
     return {
       deviceId: cfg.deviceId,
@@ -123,6 +129,8 @@ export class ConfigService {
       isFirstRun: !isConfigured,
       googleAuth: {
         isConnected: Boolean(cfg.googleAuth.accessToken || cfg.googleAuth.refreshToken),
+        hasClientCredentials: Boolean(effectiveClientId && effectiveClientSecret),
+        clientId: effectiveClientId,
         email: cfg.googleAuth.email,
         displayName: cfg.googleAuth.displayName,
         driveRootFolderId: cfg.googleAuth.driveRootFolderId,

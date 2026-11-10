@@ -1,22 +1,46 @@
 import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { URL } from 'node:url';
+import { WebSocketServer, WebSocket } from 'ws';
 import { serializeListFile, type SwitchFolderMode } from '@foldersync/shared';
 import { ConfigService } from './services/config-service.js';
 import { FolderService } from './services/folder-service.js';
 import { FileIndexer } from './services/file-indexer.js';
 import { FolderWatcher } from './services/folder-watcher.js';
+import { GoogleDriveProvider, GoogleOAuthService } from './services/google-drive-service.js';
+import { TelegramService } from './services/telegram-service.js';
+import { SyncCoordinator } from './services/sync-coordinator.js';
 
 export interface AgentServerContext {
   configService: ConfigService;
   folderService: FolderService;
   fileIndexer?: FileIndexer;
   folderWatcher?: FolderWatcher;
+  googleOAuthService?: GoogleOAuthService;
+  googleDriveProvider?: GoogleDriveProvider;
+  telegramService?: TelegramService;
+  syncCoordinator?: SyncCoordinator;
+  staticWebDir?: string;
 }
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+};
 
 export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
   const indexer = ctx.fileIndexer ?? new FileIndexer();
+  const oauth = ctx.googleOAuthService ?? new GoogleOAuthService(ctx.configService);
+  const driveProvider =
+    ctx.googleDriveProvider ?? new GoogleDriveProvider(ctx.configService, oauth);
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     // Enable CORS for local Web UI & Mobile
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -28,7 +52,8 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
       return;
     }
 
-    const reqUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const hostHeader = req.headers.host || 'localhost:8384';
+    const reqUrl = new URL(req.url || '/', `http://${hostHeader}`);
     const pathname = reqUrl.pathname;
 
     try {
@@ -44,6 +69,8 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
         const body = await readJsonBody<{
           deviceName?: string;
           googleAuth?: {
+            clientId?: string | null;
+            clientSecret?: string | null;
             email?: string | null;
             displayName?: string | null;
             accessToken?: string | null;
@@ -134,17 +161,195 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
         return;
       }
 
+      // GET /api/auth/google/url
+      if (req.method === 'GET' && pathname === '/api/auth/google/url') {
+        const redirectUri =
+          reqUrl.searchParams.get('redirectUri') ||
+          `http://${hostHeader}/api/auth/google/callback`;
+        const url = await oauth.getAuthorizationUrl(redirectUri);
+        sendJson(res, 200, { url, redirectUri });
+        return;
+      }
+
+      // GET /api/auth/google/callback
+      if (req.method === 'GET' && pathname === '/api/auth/google/callback') {
+        const code = reqUrl.searchParams.get('code');
+        if (!code) {
+          sendHtml(res, 400, '<h3>Thiếu mã xác thực Google OAuth2 (code).</h3>');
+          return;
+        }
+        const redirectUri = `http://${hostHeader}/api/auth/google/callback`;
+        await oauth.exchangeCode(code, redirectUri);
+        await driveProvider.ensureWorkspaceFolder();
+        if (ctx.syncCoordinator) {
+          void ctx.syncCoordinator.syncNow('GOOGLE_CONNECTED');
+        }
+
+        sendHtml(
+          res,
+          200,
+          `<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8"><title>Đăng nhập Google thành công</title></head>
+<body style="font-family:sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="text-align:center;padding:32px;background:#1e293b;border-radius:16px;">
+    <h2>✅ Đăng nhập Google thành công!</h2>
+    <p>FolderSync đã kết nối với Google Drive của bạn. Cửa sổ này sẽ tự đóng...</p>
+    <script>
+      if (window.opener) {
+        window.opener.postMessage({ type: 'GOOGLE_AUTH_SUCCESS' }, '*');
+        setTimeout(() => window.close(), 800);
+      } else {
+        setTimeout(() => { window.location.href = '/'; }, 1000);
+      }
+    </script>
+  </div>
+</body>
+</html>`,
+        );
+        return;
+      }
+
+      // POST /api/auth/google/disconnect
+      if (req.method === 'POST' && pathname === '/api/auth/google/disconnect') {
+        await oauth.disconnect();
+        const publicConfig = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, publicConfig);
+        return;
+      }
+
+      // GET /api/sync/status
+      if (req.method === 'GET' && pathname === '/api/sync/status') {
+        if (!ctx.syncCoordinator) {
+          sendJson(res, 200, {
+            isSyncing: false,
+            cloudReady: false,
+            lastSyncedAt: null,
+            lastSyncedRevision: 0,
+            lastError: null,
+            lastSummary: null,
+          });
+          return;
+        }
+        const status = await ctx.syncCoordinator.getStatus();
+        sendJson(res, 200, status);
+        return;
+      }
+
+      // GET /api/sync/logs
+      if (req.method === 'GET' && pathname === '/api/sync/logs') {
+        const logs = ctx.syncCoordinator ? ctx.syncCoordinator.getLogs() : [];
+        sendJson(res, 200, { logs });
+        return;
+      }
+
+      // POST /api/sync/trigger
+      if (req.method === 'POST' && pathname === '/api/sync/trigger') {
+        if (!ctx.syncCoordinator) {
+          sendJson(res, 400, { error: 'Bộ điều phối đồng bộ chưa được khởi tạo.' });
+          return;
+        }
+        const summary = await ctx.syncCoordinator.syncNow('MANUAL_UI');
+        const status = await ctx.syncCoordinator.getStatus();
+        sendJson(res, 200, { summary, status });
+        return;
+      }
+
+      // POST /api/telegram/test
+      if (req.method === 'POST' && pathname === '/api/telegram/test') {
+        if (!ctx.telegramService) {
+          sendJson(res, 400, { error: 'TelegramService chưa được khởi tạo.' });
+          return;
+        }
+        const body = await readJsonBody<{ botToken?: string; chatId?: string }>(req);
+        await ctx.telegramService.sendTestMessage(body.botToken, body.chatId);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      // Serve built static Web UI if available
+      if (req.method === 'GET' && ctx.staticWebDir && !pathname.startsWith('/api/')) {
+        const served = await tryServeStaticFile(ctx.staticWebDir, pathname, res);
+        if (served) return;
+      }
+
       sendJson(res, 404, { error: 'Endpoint not found' });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Internal server error';
       sendJson(res, 400, { error: message });
     }
   });
+
+  // Real-time WebSocket stream on /ws
+  const wss = new WebSocketServer({ server, path: '/ws' });
+  const broadcast = (type: string, payload: unknown) => {
+    const raw = JSON.stringify({ type, payload });
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(raw);
+      }
+    }
+  };
+
+  if (ctx.folderWatcher) {
+    ctx.folderWatcher.on('indexUpdated', (evt) => broadcast('indexUpdated', evt));
+  }
+
+  if (ctx.syncCoordinator) {
+    ctx.syncCoordinator.on('syncStarted', (evt) => broadcast('syncStarted', evt));
+    ctx.syncCoordinator.on('syncCompleted', (evt) => broadcast('syncCompleted', evt));
+    ctx.syncCoordinator.on('syncError', (evt) => broadcast('syncError', evt));
+    ctx.syncCoordinator.on('logAdded', (evt) => broadcast('logAdded', evt));
+  }
+
+  server.on('close', () => {
+    wss.close();
+  });
+
+  return server;
+}
+
+async function tryServeStaticFile(
+  staticDir: string,
+  pathname: string,
+  res: http.ServerResponse,
+): Promise<boolean> {
+  try {
+    const safeRel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+    const candidate = path.resolve(staticDir, safeRel);
+    if (!candidate.startsWith(path.resolve(staticDir))) {
+      return false;
+    }
+
+    let targetFile = candidate;
+    try {
+      const st = await fs.stat(targetFile);
+      if (!st.isFile()) {
+        targetFile = path.join(staticDir, 'index.html');
+      }
+    } catch {
+      targetFile = path.join(staticDir, 'index.html');
+    }
+
+    const content = await fs.readFile(targetFile);
+    const ext = path.extname(targetFile).toLowerCase();
+    const mime = MIME_TYPES[ext] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': mime });
+    res.end(content);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res: http.ServerResponse, status: number, html: string): void {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
 }
 
 async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {

@@ -31,12 +31,15 @@ export interface ListFileDocument {
 }
 
 export interface GoogleAuthInfo {
+  clientId: string | null;
+  clientSecret: string | null;
   email: string | null;
   displayName: string | null;
   accessToken: string | null;
   refreshToken: string | null;
   expiryDate: number | null;
   driveRootFolderId: string | null;
+  listFileDriveId: string | null;
 }
 
 export interface TelegramBotConfig {
@@ -60,6 +63,8 @@ export interface PublicAppConfig extends Omit<AppConfig, 'googleAuth' | 'telegra
   isFirstRun: boolean;
   googleAuth: {
     isConnected: boolean;
+    hasClientCredentials: boolean;
+    clientId: string | null;
     email: string | null;
     displayName: string | null;
     driveRootFolderId: string | null;
@@ -109,4 +114,34 @@ export interface ListFileDiffResult {
   toDeleteLocally: FileIndexEntry[];
   toMarkDeletedRemotely: FileIndexEntry[];
   conflicts: ConflictPair[];
+}
+
+export type SyncLogLevel = 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR';
+
+export interface SyncLogEntry {
+  id: string;
+  timestamp: string;
+  level: SyncLogLevel;
+  action: string;
+  message: string;
+}
+
+export interface SyncRunSummary {
+  reason: string;
+  uploadedCount: number;
+  downloadedCount: number;
+  deletedLocallyCount: number;
+  markedDeletedRemotelyCount: number;
+  conflictsCount: number;
+  revision: number;
+  completedAt: string;
+}
+
+export interface SyncStatusSnapshot {
+  isSyncing: boolean;
+  cloudReady: boolean;
+  lastSyncedAt: string | null;
+  lastSyncedRevision: number;
+  lastError: string | null;
+  lastSummary: SyncRunSummary | null;
 }

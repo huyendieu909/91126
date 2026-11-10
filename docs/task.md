@@ -30,11 +30,13 @@
 - [x] **Task 3.4**: Viết bộ kiểm thử tự động `list-file-codec.test.ts` và `watcher-and-indexer.test.ts` cho Giai đoạn 3
 
 ## Giai đoạn 4: Tích hợp Google OAuth2 / Drive API & Telegram Trigger
-- [ ] Xây dựng `GoogleDriveService`: xác thực OAuth2 bằng tài khoản Google, tạo thư mục đồng bộ trên Drive, tải lên/tải xuống `list-file.md` và các file thay đổi theo `driveFileId`
-- [ ] Xây dựng `SyncCoordinator`:
-  - Khi máy cục bộ thay đổi: đẩy file mới/sửa lên Drive -> cập nhật `list-file.md` -> bắn tín hiệu qua Telegram Bot
-  - Khi nhận tín hiệu từ Telegram Bot (hoặc kiểm tra định kỳ / bấm nút Sync): tải `list-file.md` về -> so sánh mã `SHA-256` -> chỉ tải về các file chưa đồng bộ qua file tạm `.sync_tmp`
-- [ ] Xây dựng `TelegramService`: gửi thông báo khi cập nhật `list-file.md`, lắng nghe tín hiệu trigger giữa các máy và hỗ trợ lệnh `/status`, `/list`
+> 📄 **Tài liệu chi tiết giai đoạn này**: [docs/phase-4-gdrive-and-telegram-sync.md](./phase-4-gdrive-and-telegram-sync.md)
+
+- [x] **Task 4.1**: Xây dựng `CloudStorageProvider`, `GoogleOAuthService` và `GoogleDriveProvider` (đọc/ghi `list-file.md` & truyền file qua Google Drive API v3)
+- [x] **Task 4.2**: Xây dựng `TelegramService` (bắn thông báo gộp, nhận tín hiệu Trigger tự động và xử lý lệnh `/status`, `/list`, `/sync`)
+- [x] **Task 4.3**: Xây dựng `SyncCoordinator` (điều phối đồng bộ 2 chiều qua `list-file.md`, chống lặp `Anti-Loop`, xử lý `DELETED` và xung đột `.conflict-<tên_máy>`)
+- [x] **Task 4.4**: Mở rộng REST API (Google OAuth, Sync Trigger, Telegram Test) và WebSocket (`/ws`) thời gian thực
+- [x] **Task 4.5**: Viết bộ kiểm thử tích hợp đa thiết bị (`sync-coordinator.test.ts`: Thêm, Sửa, Xóa, Xung đột 2 chiều)
 
 ## Giai đoạn 5: Giao diện người dùng (Web Dashboard cho PC & React Native App cho Android)
 - [ ] Thiết kế giao diện Web Dashboard (React + Tailwind CSS) cho Linux/Windows và giao diện Native (React Native / Expo) cho Android

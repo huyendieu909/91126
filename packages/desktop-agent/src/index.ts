@@ -1,13 +1,22 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ConfigService } from './services/config-service.js';
 import { FolderService } from './services/folder-service.js';
 import { FileIndexer } from './services/file-indexer.js';
 import { FolderWatcher } from './services/folder-watcher.js';
+import { GoogleDriveProvider, GoogleOAuthService } from './services/google-drive-service.js';
+import { TelegramService } from './services/telegram-service.js';
+import { SyncCoordinator } from './services/sync-coordinator.js';
 import { createAgentHttpServer } from './server.js';
 
 export * from './services/config-service.js';
 export * from './services/folder-service.js';
 export * from './services/file-indexer.js';
 export * from './services/folder-watcher.js';
+export * from './services/cloud-storage.js';
+export * from './services/google-drive-service.js';
+export * from './services/telegram-service.js';
+export * from './services/sync-coordinator.js';
 export * from './server.js';
 
 const isMainModule =
@@ -17,21 +26,43 @@ const isMainModule =
 
 if (isMainModule) {
   const port = Number(process.env.PORT || 8384);
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const staticWebDir = path.resolve(__dirname, '../../web-ui/dist');
+
   const configService = new ConfigService();
   const folderService = new FolderService(configService);
   const fileIndexer = new FileIndexer();
   const folderWatcher = new FolderWatcher(configService, folderService, fileIndexer);
+  const googleOAuthService = new GoogleOAuthService(configService);
+  const googleDriveProvider = new GoogleDriveProvider(configService, googleOAuthService);
+  const telegramService = new TelegramService(configService, fileIndexer);
+  const syncCoordinator = new SyncCoordinator(
+    configService,
+    folderService,
+    fileIndexer,
+    folderWatcher,
+    googleDriveProvider,
+    telegramService,
+  );
 
-  void folderWatcher.start();
+  void folderWatcher.start().then(() => {
+    void syncCoordinator.syncNow('STARTUP');
+  });
+  telegramService.start();
 
   const server = createAgentHttpServer({
     configService,
     folderService,
     fileIndexer,
     folderWatcher,
+    googleOAuthService,
+    googleDriveProvider,
+    telegramService,
+    syncCoordinator,
+    staticWebDir,
   });
 
   server.listen(port, () => {
-    console.log(`[FolderSync Agent] Listening on http://localhost:${port}`);
+    console.log(`[FolderSync Agent] Running on http://localhost:${port}`);
   });
 }
