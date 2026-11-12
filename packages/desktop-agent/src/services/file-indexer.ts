@@ -39,7 +39,16 @@ export class FileIndexer {
     if (
       base.startsWith('.sync_tmp') ||
       base.endsWith('.sync_tmp') ||
-      base.startsWith('.unsynced_local_backup')
+      base.startsWith('.unsynced_local_backup') ||
+      base.startsWith('.~lock.') ||
+      base.startsWith('~$') ||
+      base.startsWith('.#') ||
+      base.endsWith('.swp') ||
+      base.endsWith('.swx') ||
+      base.endsWith('~') ||
+      base.endsWith('.tmp') ||
+      base.endsWith('.part') ||
+      base.endsWith('.crdownload')
     ) {
       return true;
     }
@@ -79,7 +88,7 @@ export class FileIndexer {
     const tmpDir = path.join(syncFolderPath, '.sync_tmp');
     await fs.mkdir(tmpDir, { recursive: true });
 
-    const tmpFile = path.join(tmpDir, `list-file.${process.pid}.${Date.now()}.tmp`);
+    const tmpFile = path.join(tmpDir, `list-file.${process.pid}.${crypto.randomUUID()}.tmp`);
     const targetFile = path.join(syncFolderPath, LIST_FILE_NAME);
     const markdown = serializeListFile(doc);
 
@@ -135,7 +144,13 @@ export class FileIndexer {
         continue;
       }
 
-      const sha256 = await this.computeFileSha256(fullPath);
+      let sha256: string;
+      try {
+        sha256 = await this.computeFileSha256(fullPath);
+      } catch {
+        // File disappeared right between stat and stream read
+        continue;
+      }
 
       if (prev && prev.status === 'ACTIVE' && prev.sha256 === sha256) {
         // Content hash is identical even if mtime touched

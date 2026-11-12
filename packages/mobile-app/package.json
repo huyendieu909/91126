@@ -6,6 +6,7 @@
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
+    "web:sim": "pnpm --filter @foldersync/web-ui dev:mobile",
     "build": "tsc -p tsconfig.json --noEmit",
     "test": "echo \"mobile-app tests placeholder\""
   },

@@ -162,4 +162,18 @@ describe('Phase 3: FileIndexer, list-file.md & FolderWatcher', () => {
     expect(docB.entries.map((e) => e.relativePath)).toContain('only-a.txt');
     expect(docB.entries.map((e) => e.relativePath)).toContain('added-in-b.txt');
   });
+
+  it('ignores transient editor lock/swap/temp files (.lock, ~$, .swp, .tmp, .part)', async () => {
+    const syncDir = path.join(tmpRoot, 'sync-editor-locks');
+    await fs.mkdir(syncDir, { recursive: true });
+    await fs.writeFile(path.join(syncDir, 'real-note.md'), '# Real Note', 'utf-8');
+    await fs.writeFile(path.join(syncDir, '.~lock.list-file.md#'), 'libreoffice-lock', 'utf-8');
+    await fs.writeFile(path.join(syncDir, '~$budget.xlsx'), 'office-lock', 'utf-8');
+    await fs.writeFile(path.join(syncDir, '.real-note.md.swp'), 'vim-swap', 'utf-8');
+    await fs.writeFile(path.join(syncDir, 'video.mp4.part'), 'partial-dl', 'utf-8');
+    await fs.writeFile(path.join(syncDir, 'scratch.tmp'), 'tmp', 'utf-8');
+
+    const { doc } = await fileIndexer.scanAndSyncLocalListFile(syncDir, 'Test-Linux-PC');
+    expect(doc.entries.map((e) => e.relativePath)).toEqual(['real-note.md']);
+  });
 });

@@ -6,6 +6,8 @@
   "scripts": {
     "build": "pnpm --filter @foldersync/shared build && pnpm --filter @foldersync/web-ui build && pnpm --filter @foldersync/desktop-agent build && pnpm --filter @foldersync/mobile-app build",
     "dev": "pnpm --filter @foldersync/desktop-agent dev",
+    "dev:mobile": "pnpm --filter @foldersync/web-ui dev:mobile",
+    "dev:node2": "pnpm --filter @foldersync/desktop-agent dev:node2",
     "start": "pnpm --filter @foldersync/desktop-agent start",
     "test": "pnpm -r test"
   },
