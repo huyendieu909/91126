@@ -202,6 +202,52 @@ sequenceDiagram
 
 ---
 
+### 4.5. Kiến Trúc Mạng Lưới Nhiều Vùng Đồng Bộ Độc Lập (Multi-Zone Sync Network)
+
+Hệ thống hỗ trợ tạo nhiều **Vùng Đồng Bộ (`SyncZone`)** độc lập. Mỗi vùng có 1 thư mục riêng trên Google Drive (`Zone_<zoneId>`), 1 bảng chỉ mục `list-file.md` riêng và danh sách thành viên (`knownDevices` / `memberDevices`) riêng được quản lý qua `zones-registry.json`:
+
+```mermaid
+flowchart TD
+    subgraph GDrive["☁️ Google Drive (.FolderSync_Workspace)"]
+        Reg["📄 zones-registry.json\n(Danh bạ các Vùng Sync & Danh sách máy tham gia)"]
+        
+        subgraph Z1["📁 Zone_work-docs (Vùng Tài liệu Công việc)"]
+            L1["📄 list-file.md\n(knownDevices: Linux-PC, Windows-PC)"]
+            R1["📦 File tạm trung chuyển\n(Tự xóa ngay khi Linux-PC + Windows-PC tải xong)"]
+        end
+
+        subgraph Z2["📁 Zone_mobile-notes (Vùng Ghi chú & Ảnh)"]
+            L2["📄 list-file.md\n(knownDevices: Linux-PC, Android-Phone)"]
+            R2["📦 File tạm trung chuyển\n(Tự xóa ngay khi Linux-PC + Android-Phone tải xong)"]
+        end
+    end
+
+    Linux["💻 Máy Linux\n- Tham gia Zone 1 -> ~/WorkDocs\n- Tham gia Zone 2 -> ~/MobileNotes"]
+    Win["🖥️ Máy Windows\n- Tham gia Zone 1 -> D:\\WorkDocs\n- (Không tham gia Zone 2)"]
+    Phone["📱 Điện thoại Android\n- (Không tham gia Zone 1)\n- Tham gia Zone 2 -> /Documents/Notes"]
+
+    Linux <--> Z1
+    Win <--> Z1
+    Linux <--> Z2
+    Phone <--> Z2
+    Linux -.-> Reg
+    Win -.-> Reg
+    Phone -.-> Reg
+```
+
+---
+
+### 4.6. Đồng Bộ Ngầm 2 Chiều Đa Vùng & Liên Kết Telegram 1-Chạm (Zero-ChatID Pairing)
+
+1. **Đồng bộ ngầm 2 chiều độc lập (`startBackgroundSync` + `extraZoneWatchers`)**:
+   - **Chiều đẩy tự động (Local -> Cloud)**: [`FolderWatcher`](file:///home/quyhx/Downloads/tmp/91126/packages/desktop-agent/src/services/folder-watcher.ts) duy trì đồng thời các bộ theo dõi `chokidar` trên **tất cả các Vùng đang tham gia (`joined: true`)**, tự động đẩy thay đổi ngay cả ở các vùng không đang hiển thị trên giao diện.
+   - **Chiều kéo & dọn trạm tự động (Cloud -> Local)**: [`SyncCoordinator`](file:///home/quyhx/Downloads/tmp/91126/packages/desktop-agent/src/services/sync-coordinator.ts) chạy bộ kiểm tra định kỳ `pollRemoteChangesOnce` (mặc định mỗi `15s` qua `SYNC_POLL_INTERVAL_MS`), tự động phát hiện `revision` mới trên `list-file.md`, đáp ứng yêu cầu đẩy lại `@NEED_UPLOAD` và tự hủy file trung chuyển **ngay cả khi người dùng không bật Telegram Bot**.
+2. **Liên kết Telegram 1-Chạm (`Deep-Link Pairing`)**:
+   - Nạp sẵn `TELEGRAM_BOT_TOKEN` từ `.env` (hoặc dán 1 lần duy nhất).
+   - Khi bấm **Liên kết Cá nhân 1-Chạm** (hoặc **Thêm Bot vào Nhóm**), [`TelegramService`](file:///home/quyhx/Downloads/tmp/91126/packages/desktop-agent/src/services/telegram-service.ts) mở link `https://t.me/<BotUsername>?start=pair_xxxx`. Ngay khi người dùng nhấn **START** trên ứng dụng Telegram, Agent tự động bắt lấy `chatId` + `chatTitle`, kích hoạt thông báo, gửi tin chào mừng và đẩy sự kiện `telegramPaired` qua WebSocket về trình duyệt mà không cần tra cứu thủ công `Chat ID`.
+
+---
+
 ## 5. Danh Mục Các Package & File Quan Trọng
 
 | Package | File chính | Vai trò |

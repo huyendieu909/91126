@@ -72,7 +72,29 @@
 - [x] **Task 9.3**: Chia các thay đổi hiện tại trên nhánh `feature/phase-5` thành 5 commit rõ ràng, mạch lạc theo từng nhóm tính năng (bỏ qua file cấu hình IDE `.idea`)
 
 ## Giai đoạn 10 (Đề xuất): Kiến Trúc Nhiều Vùng Đồng Bộ Độc Lập (Multi-Zone Sync Network)
-- [ ] **Task 10.1**: Mở rộng `@foldersync/shared` với kiểu dữ liệu `SyncZoneMetadata`, `ZonesRegistryDocument` (`zones-registry.json`) và `LocalZoneBinding`
-- [ ] **Task 10.2**: Nâng cấp `Desktop Agent` (`ConfigService`, `GoogleDriveProvider`, `MultiZoneSyncManager`, REST API `/api/zones/*`) hỗ trợ tạo vùng mới, khám phá các vùng có sẵn trên Google Drive, tham gia (`Join Zone`) / rời vùng (`Leave Zone`) và chạy đồng bộ độc lập từng vùng
-- [ ] **Task 10.3**: Nâng cấp `@foldersync/web-ui` và `@foldersync/mobile-app` cho phép xem danh sách các Vùng Sync trên mạng, bật/tắt tham gia từng vùng gắn với từng thư mục riêng trên máy, và tạo vùng đồng bộ mới
-- [ ] **Task 10.4**: Viết Unit & Integration Tests kiểm chứng đồng bộ đa vùng độc lập (máy chỉ tải dữ liệu của vùng mình tham gia, và cơ chế tự hủy file trên Google Drive tính riêng theo danh sách thành viên của từng vùng)
+- [x] **Task 10.1**: Mở rộng `@foldersync/shared` với kiểu dữ liệu `SyncZoneMetadata`, `ZonesRegistryDocument` (`zones-registry.json`) và `LocalZoneBinding`
+- [x] **Task 10.2**: Nâng cấp `Desktop Agent` (`ConfigService`, `GoogleDriveProvider`, `MultiZoneSyncManager`, REST API `/api/zones/*`) hỗ trợ tạo vùng mới, khám phá các vùng có sẵn trên Google Drive, tham gia (`Join Zone`) / rời vùng (`Leave Zone`) và chạy đồng bộ độc lập từng vùng
+- [x] **Task 10.3**: Nâng cấp `@foldersync/web-ui` và `@foldersync/mobile-app` cho phép xem danh sách các Vùng Sync trên mạng, bật/tắt tham gia từng vùng gắn với từng thư mục riêng trên máy, và tạo vùng đồng bộ mới
+- [x] **Task 10.4**: Viết Unit & Integration Tests kiểm chứng đồng bộ đa vùng độc lập (máy chỉ tải dữ liệu của vùng mình tham gia, và cơ chế tự hủy file trên Google Drive tính riêng theo danh sách thành viên của từng vùng)
+
+## Giai đoạn 11: Đồng Bộ Ngầm 2 Chiều Thực Thụ Đa Vùng & Liên Kết Telegram 1-Chạm
+- [x] **Task 11.1**: Nâng cấp `FolderWatcher` (canh `chokidar` đồng thời tất cả các thư mục thuộc các Vùng `joined: true`) và `SyncCoordinator` (thêm bộ kiểm tra ngầm định kỳ `startBackgroundSync` tự động kéo thay đổi mới từ `list-file.md` trên Drive mà không phụ thuộc Telegram)
+- [x] **Task 11.2**: Nâng cấp `ConfigService`, `TelegramService`, REST API (`/api/telegram/*`) và `SettingsModals.tsx` tự nạp `TELEGRAM_BOT_TOKEN` từ `.env`, hỗ trợ **Liên kết Telegram 1-Chạm** qua Deep-Link (`t.me/<bot>?start=pair_xxxx`) và **Dropdown chọn Chat/Group tự động** không cần gõ tay `Chat ID`
+- [x] **Task 11.3**: Viết Unit & Integration Tests kiểm chứng đồng bộ ngầm 2 chiều đa vùng và luồng ghép đôi Telegram 1-Chạm
+
+## Giai đoạn 12: Vá Lỗi File Khóa Tạm & Môi Trường Debug Trực Tiếp Trên Máy Dev (Không Cần Expo Go / APK)
+- [x] **Task 12.0**: Lọc bỏ file khóa tạm trình soạn thảo (`.~lock.*#`, `~$*`, `*.swp`, `.#*`, `*.tmp`) trong `FileIndexer`, xử lý êm `ENOENT` khi file tạm tự xóa giữa lúc upload và bọc `.catch()` an toàn cho các sự kiện ngầm trong `SyncCoordinator`
+- [x] **Task 12.1**: Xây dựng lớp **Platform Storage & Crypto Adapter** (`platform-fs.ts`) cho `@foldersync/mobile-app` (tự động dùng SAF + `expo-crypto` trên Android thật, và dùng Browser `showDirectoryPicker` / `IndexedDB` + `localStorage` + `Web Crypto API` khi chạy trên trình duyệt máy dev)
+- [x] **Task 12.2**: Thiết lập bộ chạy **Mobile Web Simulator** bằng Vite + `react-native-web` (`pnpm dev:mobile` chạy tại `http://localhost:8390`), hiển thị khung điện thoại trực quan trên trình duyệt, hỗ trợ Hot-Reload & `F12` DevTools
+- [x] **Task 12.3**: Thêm script tiện ích `pnpm dev:node2` chạy thêm 1 Desktop Agent cô lập tại `http://localhost:8385` (tự động kế thừa sẵn khóa Google OAuth từ node chính để test đồng bộ đa thiết bị ngay trên 1 máy)
+- [x] **Task 12.4**: Build kiểm chứng toàn bộ workspace, viết test cho bộ lọc file tạm `.~lock` và khởi chạy kiểm tra thực tế Mobile Simulator (`:8390`) + Desktop Agent (`:8384`)
+
+## Giai đoạn 13: Tinh Chỉnh Bố Cục Giao Diện Mobile `App.tsx` (Safe Area & Flexbox)
+- [x] **Task 13.1**: Sửa vùng đệm an toàn trên Android trong `App.tsx` (tự động cộng `StatusBar.currentHeight` cho `paddingTop` và thêm `paddingBottom` tránh đè lên đồng hồ/pin và thanh điều hướng 3 nút)
+- [x] **Task 13.2**: Sửa bố cục Header (`flex: 1` chống tràn nút `⚙️ Cài đặt`) và tách cụm nút Vùng đồng bộ thành **2 hàng thoáng đẹp** (nút `Đồng bộ ngay` rộng 100%, 2 nút phụ chia đôi 50%–50%)
+- [x] **Task 13.3**: Đồng bộ khung hiển thị của **Mobile Web Simulator (`:8390`)** (`main.tsx` & `rn-web-shim.tsx`) chuẩn theo bề ngang màn hình điện thoại Android (`360px`) và kiểm chứng build TypeScript
+
+## Giai đoạn 14: Khắc Phục & Minh Bạch Hóa Thông Báo Đồng Bộ Telegram 2 Chiều
+- [x] **Task 14.1**: Cập nhật `ConfigService` và `SettingsModals.tsx` — hiển thị rõ kênh Telegram đã lưu (`chatId` + `hasToken`), hỗ trợ bật/tạm dừng 1-chạm và tự động kích hoạt `enabled: true` trên cấu hình hiện tại khi đủ khóa
+- [x] **Task 14.2**: Nâng cấp `TelegramService` và `SyncCoordinator` — gửi thông báo cho cả chiều **Đẩy lên (`uploaded`)** lẫn **Tải về (`downloaded`)** kèm tên Vùng đồng bộ, và ghi rõ kết quả/lỗi gửi Telegram vào bảng **Nhật ký hoạt động thời gian thực**
+- [x] **Task 14.3**: Đồng bộ thông báo Telegram 2 chiều trên `android-sync-engine.ts`, viết Unit/Integration Test kiểm chứng và kiểm tra gửi tin nhắn thực tế về `chatId: 8384943180`

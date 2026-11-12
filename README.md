@@ -69,13 +69,25 @@ pnpm start
 ```
 Sau đó mở trình duyệt truy cập: **`http://localhost:8384`**
 
-### 3. Chạy trên Android (React Native / Expo SDK 58)
+### 3. Debug Mobile App & Đa Thiết Bị Trực Tiếp Trên Máy Dev (Không Cần Expo Go / APK)
+- **Mở trình giả lập Mobile App trên trình duyệt máy Dev (Hot-Reload + `F12` Breakpoint)**:
+  ```bash
+  pnpm dev:mobile
+  ```
+  Sau đó mở trình duyệt tại **`http://localhost:8390`** (chạy trực tiếp `packages/mobile-app/App.tsx` và `android-sync-engine.ts` gắn với thư mục thật trên ổ cứng máy Dev).
+- **Chạy thêm Node PC thứ 2 độc lập ngay trên cùng máy (tự kế thừa sẵn khóa Google OAuth)**:
+  ```bash
+  pnpm dev:node2
+  ```
+  Mở **`http://localhost:8385`** để kiểm thử đồng bộ song song 2–3 thiết bị / đa vùng ngay trên 1 màn hình.
+
+### 4. Chạy trên Điện Thoại Android Thật (React Native / Expo SDK 58)
 ```bash
 npx --yes expo@58.0.23 start --dir packages/mobile-app --lan
 ```
 Mở ứng dụng **Expo Go (SDK 58)** trên điện thoại Android để quét mã QR (hoặc nhập URL `exp://<IP-LAN>:8081`).
 
-### 4. Chạy bộ kiểm thử tự động (Unit & Multi-Device Integration Tests)
+### 5. Chạy bộ kiểm thử tự động (Unit & Multi-Device Integration Tests)
 ```bash
 pnpm test
 ```
