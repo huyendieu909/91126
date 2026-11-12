@@ -1,10 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
+  DEFAULT_ZONE_ID,
+  DEFAULT_ZONE_NAME,
   LIST_FILE_NAME,
+  ZONES_REGISTRY_FILE_NAME,
   parseListFile,
+  parseZonesRegistry,
   serializeListFile,
+  serializeZonesRegistry,
   type ListFileDocument,
+  type ZonesRegistryDocument,
 } from '@foldersync/shared';
 import type { ConfigService } from './config-service.js';
 import type { CloudStorageProvider } from './cloud-storage.js';
@@ -239,13 +245,130 @@ export class GoogleDriveProvider implements CloudStorageProvider {
     return created.id;
   }
 
-  private async findListFileId(rootFolderId: string, token: string): Promise<string | null> {
-    const cfg = await this.configService.loadConfig();
-    if (cfg.googleAuth.listFileDriveId) {
-      return cfg.googleAuth.listFileDriveId;
+  public async ensureZoneFolder(
+    zoneId = DEFAULT_ZONE_ID,
+    zoneName = DEFAULT_ZONE_NAME,
+  ): Promise<string> {
+    const rootFolderId = await this.ensureWorkspaceFolder();
+    if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
+      return rootFolderId;
     }
 
-    const query = `name = '${LIST_FILE_NAME}' and '${rootFolderId}' in parents and trashed = false`;
+    const cfg = await this.configService.loadConfig();
+    const existingZone = cfg.zones?.find((z) => z.zoneId === zoneId);
+    if (existingZone?.driveFolderId) {
+      return existingZone.driveFolderId;
+    }
+
+    const token = await this.oauthService.getValidAccessToken();
+    const folderDisplayName = `Zone_${zoneId}`;
+    const query = `name = '${folderDisplayName}' and '${rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+    const searchUrl = `${DRIVE_FILES_API}?q=${encodeURIComponent(query)}&fields=files(id,name)&spaces=drive`;
+
+    const searchRes = await fetch(searchUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (searchRes.ok) {
+      const searchData = (await searchRes.json()) as { files?: Array<{ id: string }> };
+      if (searchData.files && searchData.files.length > 0) {
+        return searchData.files[0].id;
+      }
+    }
+
+    const createRes = await fetch(DRIVE_FILES_API, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: folderDisplayName,
+        description: zoneName,
+        parents: [rootFolderId],
+        mimeType: 'application/vnd.google-apps.folder',
+      }),
+    });
+
+    if (!createRes.ok) {
+      throw new Error(`Không thể tạo thư mục Vùng (${zoneName}) trên Google Drive: ${await createRes.text()}`);
+    }
+
+    const created = (await createRes.json()) as { id: string };
+    return created.id;
+  }
+
+  public async readZonesRegistry(): Promise<ZonesRegistryDocument> {
+    const token = await this.oauthService.getValidAccessToken();
+    const rootFolderId = await this.ensureWorkspaceFolder();
+    const query = `name = '${ZONES_REGISTRY_FILE_NAME}' and '${rootFolderId}' in parents and trashed = false`;
+    const url = `${DRIVE_FILES_API}?q=${encodeURIComponent(query)}&fields=files(id,name)&spaces=drive`;
+    const searchRes = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!searchRes.ok) {
+      return { updatedAt: new Date(0).toISOString(), zones: [] };
+    }
+
+    const searchData = (await searchRes.json()) as { files?: Array<{ id: string }> };
+    const regFileId = searchData.files?.[0]?.id;
+    if (!regFileId) {
+      return { updatedAt: new Date(0).toISOString(), zones: [] };
+    }
+
+    const res = await fetch(`${DRIVE_FILES_API}/${regFileId}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      return { updatedAt: new Date(0).toISOString(), zones: [] };
+    }
+
+    return parseZonesRegistry(await res.text());
+  }
+
+  public async writeZonesRegistry(doc: ZonesRegistryDocument): Promise<void> {
+    const token = await this.oauthService.getValidAccessToken();
+    const rootFolderId = await this.ensureWorkspaceFolder();
+    const query = `name = '${ZONES_REGISTRY_FILE_NAME}' and '${rootFolderId}' in parents and trashed = false`;
+    const url = `${DRIVE_FILES_API}?q=${encodeURIComponent(query)}&fields=files(id,name)&spaces=drive`;
+    const searchRes = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const searchData = searchRes.ok
+      ? ((await searchRes.json()) as { files?: Array<{ id: string }> })
+      : {};
+    const existingId = searchData.files?.[0]?.id;
+
+    const jsonBuffer = Buffer.from(serializeZonesRegistry(doc), 'utf-8');
+    await this.uploadMultipartBuffer(
+      token,
+      ZONES_REGISTRY_FILE_NAME,
+      'application/json',
+      jsonBuffer,
+      rootFolderId,
+      existingId,
+    );
+  }
+
+  private async findListFileId(
+    folderId: string,
+    token: string,
+    zoneId = DEFAULT_ZONE_ID,
+  ): Promise<string | null> {
+    const cfg = await this.configService.loadConfig();
+    if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
+      if (cfg.googleAuth.listFileDriveId) {
+        return cfg.googleAuth.listFileDriveId;
+      }
+    } else {
+      const zoneCfg = cfg.zones?.find((z) => z.zoneId === zoneId);
+      if (zoneCfg?.listFileDriveId) {
+        return zoneCfg.listFileDriveId;
+      }
+    }
+
+    const query = `name = '${LIST_FILE_NAME}' and '${folderId}' in parents and trashed = false`;
     const url = `${DRIVE_FILES_API}?q=${encodeURIComponent(query)}&fields=files(id,name)&spaces=drive`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${token}` },
@@ -258,19 +381,21 @@ export class GoogleDriveProvider implements CloudStorageProvider {
     const data = (await res.json()) as { files?: Array<{ id: string }> };
     if (data.files && data.files.length > 0) {
       const id = data.files[0].id;
-      await this.configService.saveConfig({
-        googleAuth: { listFileDriveId: id },
-      });
+      if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
+        await this.configService.saveConfig({
+          googleAuth: { listFileDriveId: id },
+        });
+      }
       return id;
     }
 
     return null;
   }
 
-  public async readRemoteListFile(): Promise<ListFileDocument | null> {
+  public async readRemoteListFile(zoneId = DEFAULT_ZONE_ID): Promise<ListFileDocument | null> {
     const token = await this.oauthService.getValidAccessToken();
-    const rootFolderId = await this.ensureWorkspaceFolder();
-    const listFileId = await this.findListFileId(rootFolderId, token);
+    const targetFolderId = await this.ensureZoneFolder(zoneId);
+    const listFileId = await this.findListFileId(targetFolderId, token, zoneId);
 
     if (!listFileId) {
       return null;
@@ -281,7 +406,9 @@ export class GoogleDriveProvider implements CloudStorageProvider {
     });
 
     if (res.status === 404) {
-      await this.configService.saveConfig({ googleAuth: { listFileDriveId: null } });
+      if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
+        await this.configService.saveConfig({ googleAuth: { listFileDriveId: null } });
+      }
       return null;
     }
 
@@ -293,10 +420,13 @@ export class GoogleDriveProvider implements CloudStorageProvider {
     return parseListFile(markdown);
   }
 
-  public async writeRemoteListFile(doc: ListFileDocument): Promise<string> {
+  public async writeRemoteListFile(
+    doc: ListFileDocument,
+    zoneId = DEFAULT_ZONE_ID,
+  ): Promise<string> {
     const token = await this.oauthService.getValidAccessToken();
-    const rootFolderId = await this.ensureWorkspaceFolder();
-    const existingId = await this.findListFileId(rootFolderId, token);
+    const targetFolderId = await this.ensureZoneFolder(zoneId);
+    const existingId = await this.findListFileId(targetFolderId, token, zoneId);
     const markdownBuffer = Buffer.from(serializeListFile(doc), 'utf-8');
 
     const fileId = await this.uploadMultipartBuffer(
@@ -304,13 +434,15 @@ export class GoogleDriveProvider implements CloudStorageProvider {
       LIST_FILE_NAME,
       'text/markdown',
       markdownBuffer,
-      rootFolderId,
+      targetFolderId,
       existingId ?? undefined,
     );
 
-    await this.configService.saveConfig({
-      googleAuth: { listFileDriveId: fileId },
-    });
+    if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
+      await this.configService.saveConfig({
+        googleAuth: { listFileDriveId: fileId },
+      });
+    }
 
     return fileId;
   }
@@ -319,9 +451,10 @@ export class GoogleDriveProvider implements CloudStorageProvider {
     localFilePath: string,
     relativePath: string,
     existingDriveFileId?: string,
+    zoneId = DEFAULT_ZONE_ID,
   ): Promise<string> {
     const token = await this.oauthService.getValidAccessToken();
-    const rootFolderId = await this.ensureWorkspaceFolder();
+    const targetFolderId = await this.ensureZoneFolder(zoneId);
     const fileBuffer = await fs.readFile(localFilePath);
 
     // Store with flat safe name inside workspace folder while keeping exact path in list-file.md
@@ -334,7 +467,7 @@ export class GoogleDriveProvider implements CloudStorageProvider {
       driveDisplayName,
       'application/octet-stream',
       fileBuffer,
-      rootFolderId,
+      targetFolderId,
       targetExistingId,
     );
   }

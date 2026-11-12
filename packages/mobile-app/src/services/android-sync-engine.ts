@@ -1,14 +1,20 @@
-import * as FileSystem from 'expo-file-system/legacy';
-import * as Crypto from 'expo-crypto';
 import {
+  DEFAULT_ZONE_ID,
+  DEFAULT_ZONE_NAME,
   LIST_FILE_NAME,
+  ZONES_REGISTRY_FILE_NAME,
   diffListFiles,
   parseListFile,
+  parseZonesRegistry,
   serializeListFile,
+  serializeZonesRegistry,
+  slugifyZoneId,
   type FileIndexEntry,
   type ListFileDocument,
+  type LocalZoneBinding,
   type SwitchFolderMode,
   type SyncRunSummary,
+  type ZonesRegistryDocument,
 } from '@foldersync/shared';
 import {
   getValidMobileAccessToken,
@@ -16,58 +22,66 @@ import {
   saveMobileConfig,
   type MobileAppState,
 } from '../storage/mobile-config';
+import {
+  base64ToUint8Array,
+  computeSha256HexFromBase64,
+  copyDirectoryFilesFlat,
+  deletePlatformFile,
+  downloadUrlAsBase64,
+  readPlatformFileBase64,
+  requestSyncDirectoryUri,
+  scanPlatformDirectory,
+  writePlatformFile,
+} from '../storage/platform-fs';
 
-const { StorageAccessFramework } = FileSystem;
 const DRIVE_FILES_API = 'https://www.googleapis.com/drive/v3/files';
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
 const WORKSPACE_FOLDER_NAME = '.FolderSync_Workspace';
 
-function extractFileNameFromSafUri(uri: string): string {
-  const decoded = decodeURIComponent(uri);
-  const parts = decoded.split(/[/:]/);
-  return parts[parts.length - 1] || 'unknown';
-}
-
 export async function pickAndSwitchAndroidSyncFolder(
   mode: SwitchFolderMode,
 ): Promise<{ updatedState: MobileAppState; copiedCount: number } | null> {
-  const perm = await StorageAccessFramework.requestDirectoryPermissionsAsync();
-  if (!perm.granted) {
+  const newDirUri = await requestSyncDirectoryUri();
+  if (!newDirUri) {
     return null;
   }
 
-  const newDirUri = perm.directoryUri;
   const current = await loadMobileConfig();
   const prevDirUri = current.syncDirectoryUri;
   let copiedCount = 0;
 
   if (mode === 'COPY_EXISTING' && prevDirUri && prevDirUri !== newDirUri) {
-    const childUris = await StorageAccessFramework.readDirectoryAsync(prevDirUri);
-    for (const fileUri of childUris) {
-      const name = extractFileNameFromSafUri(fileUri);
-      if (name.startsWith('.sync_tmp')) continue;
-      try {
-        const base64Data = await FileSystem.readAsStringAsync(fileUri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        const destUri = await StorageAccessFramework.createFileAsync(
-          newDirUri,
-          name,
-          'application/octet-stream',
-        );
-        await FileSystem.writeAsStringAsync(destUri, base64Data, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        copiedCount += 1;
-      } catch {
-        // Skip subfolders/unreadable items if unsupported by flat SAF copy
-      }
-    }
+    copiedCount = await copyDirectoryFilesFlat(prevDirUri, newDirUri);
+  }
+
+  const activeZoneId = current.activeZoneId || DEFAULT_ZONE_ID;
+  const nextZones = [...(current.zones ?? [])];
+  const zIdx = nextZones.findIndex((z) => z.zoneId === activeZoneId);
+  if (zIdx >= 0) {
+    nextZones[zIdx] = {
+      ...nextZones[zIdx],
+      joined: true,
+      localFolderPath: newDirUri,
+      lastSyncedRevision: mode === 'POINT_ONLY' ? 0 : nextZones[zIdx].lastSyncedRevision,
+    };
+  } else {
+    nextZones.push({
+      zoneId: activeZoneId,
+      zoneName: activeZoneId === DEFAULT_ZONE_ID ? DEFAULT_ZONE_NAME : activeZoneId,
+      joined: true,
+      localFolderPath: newDirUri,
+      driveFolderId: current.googleAuth.driveRootFolderId,
+      listFileDriveId: current.googleAuth.listFileDriveId,
+      lastSyncedRevision: 0,
+      lastSyncedAt: null,
+      memberDevices: [current.deviceName],
+    });
   }
 
   const updatedState: MobileAppState = {
     ...current,
     syncDirectoryUri: newDirUri,
+    zones: nextZones,
     baselineHashes: mode === 'POINT_ONLY' ? {} : current.baselineHashes,
     lastSyncedRevision: mode === 'POINT_ONLY' ? 0 : current.lastSyncedRevision,
   };
@@ -76,58 +90,12 @@ export async function pickAndSwitchAndroidSyncFolder(
   return { updatedState, copiedCount };
 }
 
-async function scanSafDirectoryEntriesRecursive(
-  dirUri: string,
-  prefix: string,
-  uriMap: Map<string, string>,
-  fileContentsB64: Map<string, string>,
-): Promise<void> {
-  let childUris: string[] = [];
-  try {
-    childUris = await StorageAccessFramework.readDirectoryAsync(dirUri);
-  } catch {
-    return;
-  }
-
-  for (const uri of childUris) {
-    const name = extractFileNameFromSafUri(uri);
-    if (
-      !name ||
-      name.startsWith('.sync_tmp') ||
-      name.startsWith('.unsynced_local_backup') ||
-      name === '.git'
-    ) {
-      continue;
-    }
-
-    const relPath = prefix ? `${prefix}/${name}` : name;
-
-    if (relPath === LIST_FILE_NAME) {
-      uriMap.set(relPath, uri);
-      continue;
-    }
-
-    try {
-      const b64 = await FileSystem.readAsStringAsync(uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      uriMap.set(relPath, uri);
-      fileContentsB64.set(relPath, b64);
-    } catch {
-      // On Android SAF, calling readAsStringAsync on a directory URI throws
-      // "java.io.IOException: Function not implemented". Recurse into the subdirectory!
-      await scanSafDirectoryEntriesRecursive(uri, relPath, uriMap, fileContentsB64);
-    }
-  }
-}
-
 export async function scanAndroidLocalFolder(
   directoryUri: string,
   deviceName: string,
 ): Promise<{ doc: ListFileDocument; uriMap: Map<string, string> }> {
-  const uriMap = new Map<string, string>();
-  const fileContentsB64 = new Map<string, string>();
-  await scanSafDirectoryEntriesRecursive(directoryUri, '', uriMap, fileContentsB64);
+  const { uriMap, fileContentsB64, listFileMarkdown } =
+    await scanPlatformDirectory(directoryUri);
 
   let existingDoc: ListFileDocument = {
     lastUpdatedAt: new Date(0).toISOString(),
@@ -136,13 +104,9 @@ export async function scanAndroidLocalFolder(
     entries: [],
   };
 
-  const listFileUri = uriMap.get(LIST_FILE_NAME);
-  if (listFileUri) {
+  if (listFileMarkdown) {
     try {
-      const md = await FileSystem.readAsStringAsync(listFileUri, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
-      existingDoc = parseListFile(md);
+      existingDoc = parseListFile(listFileMarkdown);
     } catch {
       // Ignore parse error or unreadable list-file.md
     }
@@ -158,11 +122,8 @@ export async function scanAndroidLocalFolder(
 
   for (const [name, base64Content] of fileContentsB64.entries()) {
     seen.add(name);
-    const sha256 = await Crypto.digestStringAsync(
-      Crypto.CryptoDigestAlgorithm.SHA256,
-      base64Content,
-    );
-    const approxSize = Math.floor((base64Content.length * 3) / 4);
+    const sha256 = await computeSha256HexFromBase64(base64Content);
+    const exactSize = base64ToUint8Array(base64Content).byteLength;
     const prev = prevMap.get(name);
 
     if (prev && prev.status === 'ACTIVE' && prev.sha256 === sha256) {
@@ -171,7 +132,7 @@ export async function scanAndroidLocalFolder(
       nextEntries.push({
         relativePath: name,
         sha256,
-        size: approxSize,
+        size: exactSize,
         modifiedAt: new Date().toISOString(),
         status: 'ACTIVE',
         updatedBy: deviceName,
@@ -283,24 +244,231 @@ async function uploadTextOrBase64ToDrive(
   return data.id;
 }
 
-async function writeSafFile(
-  directoryUri: string,
-  uriMap: Map<string, string>,
-  fileName: string,
-  content: string,
-  encoding: FileSystem.EncodingType,
+async function ensureZoneDriveFolder(
+  token: string,
+  rootFolderId: string,
+  zoneId: string,
+  zoneName: string,
 ): Promise<string> {
-  let fileUri = uriMap.get(fileName);
-  if (!fileUri) {
-    fileUri = await StorageAccessFramework.createFileAsync(
-      directoryUri,
-      fileName,
-      'application/octet-stream',
-    );
-    uriMap.set(fileName, fileUri);
+  if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
+    return rootFolderId;
   }
-  await FileSystem.writeAsStringAsync(fileUri, content, { encoding });
-  return fileUri;
+  const folderDisplayName = `Zone_${zoneId}`;
+  const q = `name = '${folderDisplayName}' and '${rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const searchRes = await fetch(
+    `${DRIVE_FILES_API}?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  const searchData = (await searchRes.json()) as { files?: Array<{ id: string }> };
+  if (searchData.files && searchData.files.length > 0) {
+    return searchData.files[0].id;
+  }
+
+  const createRes = await fetch(DRIVE_FILES_API, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: folderDisplayName,
+      description: zoneName,
+      parents: [rootFolderId],
+      mimeType: 'application/vnd.google-apps.folder',
+    }),
+  });
+  const created = (await createRes.json()) as { id: string };
+  return created.id;
+}
+
+async function readDriveZonesRegistry(
+  token: string,
+  rootFolderId: string,
+): Promise<{ doc: ZonesRegistryDocument; fileId: string | null }> {
+  const q = `name = '${ZONES_REGISTRY_FILE_NAME}' and '${rootFolderId}' in parents and trashed = false`;
+  const searchRes = await fetch(
+    `${DRIVE_FILES_API}?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  const searchData = (await searchRes.json()) as { files?: Array<{ id: string }> };
+  const fileId = searchData.files?.[0]?.id ?? null;
+  if (!fileId) {
+    return { doc: { updatedAt: new Date(0).toISOString(), zones: [] }, fileId: null };
+  }
+  const res = await fetch(`${DRIVE_FILES_API}/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    return { doc: { updatedAt: new Date(0).toISOString(), zones: [] }, fileId };
+  }
+  return { doc: parseZonesRegistry(await res.text()), fileId };
+}
+
+export async function discoverAndroidZones(): Promise<MobileAppState> {
+  const initialState = await loadMobileConfig();
+  const { token, updatedState: state } = await getValidMobileAccessToken(initialState);
+  const rootFolderId = await ensureDriveWorkspace(state);
+  const { doc: reg } = await readDriveZonesRegistry(token, rootFolderId);
+
+  const localMap = new Map<string, LocalZoneBinding>();
+  for (const z of state.zones ?? []) {
+    localMap.set(z.zoneId, { ...z });
+  }
+
+  for (const rz of reg.zones) {
+    const existing = localMap.get(rz.zoneId);
+    if (existing) {
+      localMap.set(rz.zoneId, {
+        ...existing,
+        zoneName: rz.zoneName || existing.zoneName,
+        description: rz.description ?? existing.description,
+        driveFolderId: rz.driveFolderId || existing.driveFolderId,
+        listFileDriveId: rz.listFileDriveId ?? existing.listFileDriveId,
+        memberDevices: rz.memberDevices,
+      });
+    } else {
+      localMap.set(rz.zoneId, {
+        zoneId: rz.zoneId,
+        zoneName: rz.zoneName,
+        description: rz.description,
+        joined: false,
+        localFolderPath: null,
+        driveFolderId: rz.driveFolderId,
+        listFileDriveId: rz.listFileDriveId,
+        lastSyncedRevision: 0,
+        lastSyncedAt: null,
+        memberDevices: rz.memberDevices,
+      });
+    }
+  }
+
+  const nextState: MobileAppState = {
+    ...state,
+    zones: [...localMap.values()],
+  };
+  await saveMobileConfig(nextState);
+  return nextState;
+}
+
+export async function joinOrCreateAndroidZone(params: {
+  zoneId?: string;
+  zoneName: string;
+  description?: string;
+}): Promise<MobileAppState | null> {
+  const folderUri = await requestSyncDirectoryUri(params.zoneName);
+  if (!folderUri) {
+    return null;
+  }
+  const initialState = await loadMobileConfig();
+  const zoneId = params.zoneId || slugifyZoneId(params.zoneName);
+  let driveFolderId: string | null = null;
+
+  try {
+    const { token, updatedState: state } = await getValidMobileAccessToken(initialState);
+    const rootFolderId = await ensureDriveWorkspace(state);
+    driveFolderId = await ensureZoneDriveFolder(token, rootFolderId, zoneId, params.zoneName);
+    const { doc: reg, fileId: regFileId } = await readDriveZonesRegistry(token, rootFolderId);
+    const idx = reg.zones.findIndex((z) => z.zoneId === zoneId);
+    if (idx >= 0) {
+      reg.zones[idx].memberDevices = Array.from(
+        new Set([...reg.zones[idx].memberDevices, state.deviceName]),
+      );
+    } else {
+      reg.zones.push({
+        zoneId,
+        zoneName: params.zoneName,
+        description: params.description,
+        driveFolderId,
+        listFileDriveId: null,
+        createdAt: new Date().toISOString(),
+        createdBy: state.deviceName,
+        memberDevices: [state.deviceName],
+      });
+    }
+    reg.updatedAt = new Date().toISOString();
+    await uploadTextOrBase64ToDrive(
+      token,
+      ZONES_REGISTRY_FILE_NAME,
+      'application/json',
+      serializeZonesRegistry(reg),
+      false,
+      rootFolderId,
+      regFileId ?? undefined,
+    );
+  } catch {
+    // Allow local zone binding even if offline
+  }
+
+  const latest = await loadMobileConfig();
+  const existing = (latest.zones ?? []).find((z) => z.zoneId === zoneId);
+  const binding: LocalZoneBinding = {
+    zoneId,
+    zoneName: params.zoneName,
+    description: params.description ?? existing?.description,
+    joined: true,
+    localFolderPath: folderUri,
+    driveFolderId: driveFolderId ?? existing?.driveFolderId ?? null,
+    listFileDriveId: existing?.listFileDriveId ?? null,
+    lastSyncedRevision: 0,
+    lastSyncedAt: null,
+    memberDevices: Array.from(new Set([...(existing?.memberDevices ?? []), latest.deviceName])),
+  };
+
+  const nextZones = [...(latest.zones ?? []).filter((z) => z.zoneId !== zoneId), binding];
+  const updatedState: MobileAppState = {
+    ...latest,
+    activeZoneId: zoneId,
+    syncDirectoryUri: folderUri,
+    lastSyncedRevision: 0,
+    zones: nextZones,
+  };
+  await saveMobileConfig(updatedState);
+  return updatedState;
+}
+
+export async function activateAndroidZone(zoneId: string): Promise<MobileAppState> {
+  const current = await loadMobileConfig();
+  const target = (current.zones ?? []).find((z) => z.zoneId === zoneId && z.joined);
+  if (!target || !target.localFolderPath) {
+    throw new Error('Vùng này chưa được chọn thư mục trên điện thoại.');
+  }
+  const updated: MobileAppState = {
+    ...current,
+    activeZoneId: zoneId,
+    syncDirectoryUri: target.localFolderPath,
+    lastSyncedRevision: target.lastSyncedRevision,
+    lastSyncedAt: target.lastSyncedAt,
+  };
+  await saveMobileConfig(updated);
+  return updated;
+}
+
+export async function leaveAndroidZone(zoneId: string): Promise<MobileAppState> {
+  const current = await loadMobileConfig();
+  const nextZones = (current.zones ?? []).map((z) =>
+    z.zoneId === zoneId
+      ? {
+          ...z,
+          joined: false,
+          memberDevices: (z.memberDevices ?? []).filter((d) => d !== current.deviceName),
+        }
+      : z,
+  );
+  const fallback = nextZones.find((z) => z.joined && z.localFolderPath);
+  const updated: MobileAppState = {
+    ...current,
+    activeZoneId:
+      current.activeZoneId === zoneId
+        ? (fallback?.zoneId ?? DEFAULT_ZONE_ID)
+        : current.activeZoneId,
+    syncDirectoryUri:
+      current.activeZoneId === zoneId
+        ? (fallback?.localFolderPath ?? null)
+        : current.syncDirectoryUri,
+    zones: nextZones,
+  };
+  await saveMobileConfig(updated);
+  return updated;
 }
 
 export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
@@ -312,18 +480,29 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
     throw new Error('Chưa chọn thư mục đồng bộ trên điện thoại.');
   }
   const syncDirectoryUri = initialState.syncDirectoryUri;
+  const activeZoneId = initialState.activeZoneId || DEFAULT_ZONE_ID;
   const { token, updatedState: state } = await getValidMobileAccessToken(initialState);
 
   const rootFolderId = await ensureDriveWorkspace(state);
+  const activeZoneObj = (state.zones ?? []).find((z) => z.zoneId === activeZoneId);
+  const targetZoneFolderId = await ensureZoneDriveFolder(
+    token,
+    rootFolderId,
+    activeZoneId,
+    activeZoneObj?.zoneName || DEFAULT_ZONE_NAME,
+  );
   const { doc: localDoc, uriMap } = await scanAndroidLocalFolder(
     syncDirectoryUri,
     state.deviceName,
   );
 
-  // Locate list-file.md on Google Drive
-  let listFileId = state.googleAuth.listFileDriveId;
+  // Locate list-file.md on Google Drive for the active zone
+  let listFileId =
+    activeZoneId === DEFAULT_ZONE_ID
+      ? state.googleAuth.listFileDriveId
+      : (activeZoneObj?.listFileDriveId ?? null);
   if (!listFileId) {
-    const q = `name = '${LIST_FILE_NAME}' and '${rootFolderId}' in parents and trashed = false`;
+    const q = `name = '${LIST_FILE_NAME}' and '${targetZoneFolderId}' in parents and trashed = false`;
     const searchRes = await fetch(
       `${DRIVE_FILES_API}?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`,
       { headers: { Authorization: `Bearer ${token}` } },
@@ -365,7 +544,8 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
     if (e.status === 'ACTIVE') localActiveMap.set(e.relativePath, e);
   }
 
-  const diff = diffListFiles(localDoc.entries, remoteDoc, state.baselineHashes);
+  const zoneBaseline = state.zoneBaselines?.[activeZoneId] ?? state.baselineHashes;
+  const diff = diffListFiles(localDoc.entries, remoteDoc, zoneBaseline);
   const finalMap = new Map<string, FileIndexEntry>();
   for (const e of remoteDoc.entries) {
     const localMatch = localActiveMap.get(e.relativePath);
@@ -408,24 +588,11 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
       continue;
     }
 
-    const tmpLocal = `${FileSystem.cacheDirectory ?? ''}dl_${Date.now()}`;
-    const dlRes = await FileSystem.downloadAsync(
+    const b64 = await downloadUrlAsBase64(
       `${DRIVE_FILES_API}/${rem.driveFileId}?alt=media`,
-      tmpLocal,
-      { headers: { Authorization: `Bearer ${token}` } },
+      { Authorization: `Bearer ${token}` },
     );
-    const b64 = await FileSystem.readAsStringAsync(dlRes.uri, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-    const flatName = rem.relativePath.replace(/\//g, '__');
-    await writeSafFile(
-      syncDirectoryUri,
-      uriMap,
-      flatName,
-      b64,
-      FileSystem.EncodingType.Base64,
-    );
-    await FileSystem.deleteAsync(dlRes.uri, { idempotent: true });
+    await writePlatformFile(syncDirectoryUri, uriMap, rem.relativePath, b64, true);
     finalMap.set(rem.relativePath, {
       ...rem,
       syncedDevices: Array.from(
@@ -440,7 +607,7 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
   for (const remDel of diff.toDeleteLocally) {
     const existingUri = uriMap.get(remDel.relativePath);
     if (existingUri) {
-      await StorageAccessFramework.deleteAsync(existingUri, { idempotent: true });
+      await deletePlatformFile(syncDirectoryUri, existingUri, remDel.relativePath);
       uriMap.delete(remDel.relativePath);
     }
     finalMap.set(remDel.relativePath, {
@@ -456,9 +623,7 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
   for (const loc of diff.toUpload) {
     const fileUri = uriMap.get(loc.relativePath);
     if (!fileUri) continue;
-    const b64 = await FileSystem.readAsStringAsync(fileUri, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
+    const b64 = await readPlatformFileBase64(syncDirectoryUri, fileUri, loc.relativePath);
     const prevRemote = finalMap.get(loc.relativePath);
     const driveId = await uploadTextOrBase64ToDrive(
       token,
@@ -466,7 +631,7 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
       'application/octet-stream',
       b64,
       true,
-      rootFolderId,
+      targetZoneFolderId,
       prevRemote?.driveFileId !== '-' ? prevRemote?.driveFileId : undefined,
     );
     finalMap.set(loc.relativePath, {
@@ -489,16 +654,14 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
       const localMatch = localActiveMap.get(entry.relativePath);
       const fileUri = uriMap.get(entry.relativePath);
       if (localMatch && localMatch.sha256 === entry.sha256 && fileUri) {
-        const b64 = await FileSystem.readAsStringAsync(fileUri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
+        const b64 = await readPlatformFileBase64(syncDirectoryUri, fileUri, entry.relativePath);
         const driveId = await uploadTextOrBase64ToDrive(
           token,
           entry.relativePath.replace(/\//g, '__'),
           'application/octet-stream',
           b64,
           true,
-          rootFolderId,
+          targetZoneFolderId,
         );
         finalMap.set(entry.relativePath, {
           ...entry,
@@ -516,17 +679,9 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
     conflictsCount += 1;
     const fileUri = uriMap.get(conf.relativePath);
     if (fileUri) {
-      const b64 = await FileSystem.readAsStringAsync(fileUri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+      const b64 = await readPlatformFileBase64(syncDirectoryUri, fileUri, conf.relativePath);
       const backupName = `${conf.relativePath}.conflict-${state.deviceName}`;
-      await writeSafFile(
-        syncDirectoryUri,
-        uriMap,
-        backupName,
-        b64,
-        FileSystem.EncodingType.Base64,
-      );
+      await writePlatformFile(syncDirectoryUri, uriMap, backupName, b64, true);
     }
   }
 
@@ -615,29 +770,68 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
       'text/markdown',
       serializedMd,
       false,
-      rootFolderId,
+      targetZoneFolderId,
       listFileId ?? undefined,
     );
+  }
 
-    if (state.telegramBot.enabled && state.telegramBot.botToken && state.telegramBot.chatId) {
-      await fetch(`https://api.telegram.org/bot${state.telegramBot.botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: state.telegramBot.chatId,
-          text: `🔄 [FolderSync Rev #${nextRev} | By: ${state.deviceName}]\n✅ Điện thoại Android vừa đẩy lên ${uploadedCount} file, xóa ${markedDeletedRemotelyCount} file.`,
-        }),
-      }).catch(() => undefined);
+  const hasOutbound =
+    uploadedCount > 0 || markedDeletedRemotelyCount > 0 || conflictsCount > 0;
+  const hasInbound = downloadedCount > 0 || deletedLocallyCount > 0;
+
+  if (
+    (hasOutbound || hasInbound) &&
+    state.telegramBot.enabled &&
+    state.telegramBot.botToken &&
+    state.telegramBot.chatId
+  ) {
+    const zoneLabel = activeZoneObj?.zoneName || activeZoneId;
+    const lines: string[] = [
+      hasOutbound
+        ? `🔄 [FolderSync Rev #${nextRev} | By: ${state.deviceName}]`
+        : `📥 [FolderSync Synced #${nextRev} | On: ${state.deviceName}]`,
+      `🌐 Vùng đồng bộ: ${zoneLabel}`,
+    ];
+    if (uploadedCount > 0) {
+      lines.push(`✅ Đã đẩy lên: ${uploadedCount} file`);
+    }
+    if (downloadedCount > 0) {
+      lines.push(`📥 Đã tải về điện thoại: ${downloadedCount} file`);
+    }
+    if (markedDeletedRemotelyCount > 0) {
+      lines.push(`🗑️ Đã xóa: ${markedDeletedRemotelyCount} file`);
+    }
+    if (deletedLocallyCount > 0) {
+      lines.push(`🧹 Đã dọn file bị xóa từ xa: ${deletedLocallyCount} file`);
+    }
+    if (conflictsCount > 0) {
+      lines.push(`⚠️ Xung đột (đã tách bản sao): ${conflictsCount} file`);
+    }
+    if (hasOutbound) {
+      lines.push(`📱 Các thiết bị khác có thể kiểm tra list-file.md để đồng bộ ngay!`);
+    }
+
+    try {
+      const teleRes = await fetch(
+        `https://api.telegram.org/bot${state.telegramBot.botToken}/sendMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: state.telegramBot.chatId,
+            text: lines.join('\n'),
+          }),
+        },
+      );
+      if (!teleRes.ok) {
+        console.warn('[FolderSync][Telegram] Gửi thông báo thất bại:', await teleRes.text());
+      }
+    } catch (teleErr) {
+      console.warn('[FolderSync][Telegram] Lỗi kết nối Telegram:', teleErr);
     }
   }
 
-  await writeSafFile(
-    syncDirectoryUri,
-    uriMap,
-    LIST_FILE_NAME,
-    serializedMd,
-    FileSystem.EncodingType.UTF8,
-  );
+  await writePlatformFile(syncDirectoryUri, uriMap, LIST_FILE_NAME, serializedMd, false);
 
   const nextBaseline: Record<string, string> = {};
   for (const e of finalDoc.entries) {
@@ -647,15 +841,34 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
     }
   }
 
+  const updatedZones = (state.zones ?? []).map((z) =>
+    z.zoneId === activeZoneId
+      ? {
+          ...z,
+          driveFolderId: targetZoneFolderId,
+          listFileDriveId: listFileId,
+          lastSyncedRevision: nextRev,
+          lastSyncedAt: nowIso,
+          memberDevices: knownDevices,
+        }
+      : z,
+  );
+
   await saveMobileConfig({
     ...state,
     lastSyncedRevision: nextRev,
     lastSyncedAt: nowIso,
     baselineHashes: nextBaseline,
+    zoneBaselines: {
+      ...(state.zoneBaselines ?? {}),
+      [activeZoneId]: nextBaseline,
+    },
+    zones: updatedZones,
     googleAuth: {
       ...state.googleAuth,
       driveRootFolderId: rootFolderId,
-      listFileDriveId: listFileId,
+      listFileDriveId:
+        activeZoneId === DEFAULT_ZONE_ID ? listFileId : state.googleAuth.listFileDriveId,
     },
   });
 

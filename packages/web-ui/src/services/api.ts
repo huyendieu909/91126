@@ -2,12 +2,16 @@ import type {
   DirectoryBrowseResult,
   ExistingDataStrategy,
   ListFileDocument,
+  LocalZoneBinding,
   PublicAppConfig,
   SwitchFolderMode,
   SwitchFolderResult,
   SyncLogEntry,
+  SyncProgress,
   SyncRunSummary,
   SyncStatusSnapshot,
+  TelegramChatCandidate,
+  TelegramPairingSession,
 } from '@foldersync/shared';
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -122,10 +126,135 @@ export const api = {
       body: JSON.stringify({ botToken, chatId }),
     });
   },
+
+  startTelegramPairing(botToken?: string): Promise<{
+    session: TelegramPairingSession;
+    config: PublicAppConfig;
+  }> {
+    return requestJson<{ session: TelegramPairingSession; config: PublicAppConfig }>(
+      '/api/telegram/pair/start',
+      {
+        method: 'POST',
+        body: JSON.stringify({ botToken }),
+      },
+    );
+  },
+
+  discoverTelegramChats(botToken?: string): Promise<{
+    paired: boolean;
+    pairedChat?: TelegramChatCandidate;
+    chats: TelegramChatCandidate[];
+    config: PublicAppConfig;
+  }> {
+    const q = botToken ? `?botToken=${encodeURIComponent(botToken)}` : '';
+    return requestJson<{
+      paired: boolean;
+      pairedChat?: TelegramChatCandidate;
+      chats: TelegramChatCandidate[];
+      config: PublicAppConfig;
+    }>(`/api/telegram/chats${q}`);
+  },
+
+  selectTelegramChat(payload: {
+    chatId: string;
+    chatTitle?: string;
+    botToken?: string;
+  }): Promise<PublicAppConfig> {
+    return requestJson<PublicAppConfig>('/api/telegram/select-chat', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  disconnectTelegram(): Promise<PublicAppConfig> {
+    return requestJson<PublicAppConfig>('/api/telegram/disconnect', {
+      method: 'POST',
+    });
+  },
+
+  getZones(): Promise<{
+    zones: LocalZoneBinding[];
+    activeZoneId?: string | null;
+    config: PublicAppConfig;
+  }> {
+    return requestJson<{
+      zones: LocalZoneBinding[];
+      activeZoneId?: string | null;
+      config: PublicAppConfig;
+    }>('/api/zones');
+  },
+
+  createZone(payload: {
+    zoneName: string;
+    description?: string;
+    localFolderPath: string;
+    existingDataStrategy?: ExistingDataStrategy;
+  }): Promise<{ zone: LocalZoneBinding; config: PublicAppConfig }> {
+    return requestJson<{ zone: LocalZoneBinding; config: PublicAppConfig }>(
+      '/api/zones/create',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
+  },
+
+  joinZone(payload: {
+    zoneId: string;
+    localFolderPath: string;
+    existingDataStrategy?: ExistingDataStrategy;
+  }): Promise<{ zone: LocalZoneBinding; config: PublicAppConfig }> {
+    return requestJson<{ zone: LocalZoneBinding; config: PublicAppConfig }>('/api/zones/join', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  leaveZone(zoneId: string): Promise<{ zones: LocalZoneBinding[]; config: PublicAppConfig }> {
+    return requestJson<{ zones: LocalZoneBinding[]; config: PublicAppConfig }>(
+      '/api/zones/leave',
+      {
+        method: 'POST',
+        body: JSON.stringify({ zoneId }),
+      },
+    );
+  },
+
+  activateZone(zoneId: string): Promise<{ zone: LocalZoneBinding; config: PublicAppConfig }> {
+    return requestJson<{ zone: LocalZoneBinding; config: PublicAppConfig }>(
+      '/api/zones/activate',
+      {
+        method: 'POST',
+        body: JSON.stringify({ zoneId }),
+      },
+    );
+  },
+
+  syncZone(zoneId: string): Promise<{
+    summary: SyncRunSummary | null;
+    status: SyncStatusSnapshot;
+    config: PublicAppConfig;
+  }> {
+    return requestJson<{
+      summary: SyncRunSummary | null;
+      status: SyncStatusSnapshot;
+      config: PublicAppConfig;
+    }>('/api/zones/sync', {
+      method: 'POST',
+      body: JSON.stringify({ zoneId }),
+    });
+  },
 };
 
 export interface RealtimeWsMessage {
-  type: 'indexUpdated' | 'syncStarted' | 'syncCompleted' | 'syncError' | 'logAdded';
+  type:
+    | 'indexUpdated'
+    | 'syncStarted'
+    | 'syncCompleted'
+    | 'syncError'
+    | 'syncProgress'
+    | 'logAdded'
+    | 'telegramPaired';
   payload: unknown;
 }
 

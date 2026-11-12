@@ -13,6 +13,7 @@ import type {
   PublicAppConfig,
   SwitchFolderMode,
   SyncLogEntry,
+  SyncProgress,
   SyncStatusSnapshot,
 } from '@foldersync/shared';
 import { api, subscribeAgentEvents } from './services/api';
@@ -21,12 +22,14 @@ import { FolderBrowserModal } from './components/FolderBrowserModal';
 import { ListFileTable } from './components/ListFileTable';
 import { IntegrationsPanel } from './components/IntegrationsPanelAdapter';
 import { SyncActivityLog } from './components/SyncActivityLog';
+import { SyncZonesPanel } from './components/SyncZonesPanel';
 
 export const App: React.FC = () => {
   const [config, setConfig] = useState<PublicAppConfig | null>(null);
   const [indexDoc, setIndexDoc] = useState<ListFileDocument | null>(null);
   const [indexMarkdown, setIndexMarkdown] = useState('');
   const [syncStatus, setSyncStatus] = useState<SyncStatusSnapshot | null>(null);
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [logs, setLogs] = useState<SyncLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [folderModalOpen, setFolderModalOpen] = useState(false);
@@ -44,6 +47,7 @@ export const App: React.FC = () => {
       setIndexDoc(idx.document);
       setIndexMarkdown(idx.markdown);
       setSyncStatus(status);
+      setSyncProgress(status.progress ?? null);
       setLogs(logsRes.logs);
     } finally {
       setLoading(false);
@@ -59,11 +63,16 @@ export const App: React.FC = () => {
       if (msg.type === 'logAdded') {
         const entry = msg.payload as SyncLogEntry;
         setLogs((prev) => [entry, ...prev.slice(0, 149)]);
+      } else if (msg.type === 'syncProgress') {
+        setSyncProgress((msg.payload as SyncProgress | null) ?? null);
+      } else if (msg.type === 'syncStarted') {
+        setSyncStatus((prev) => (prev ? { ...prev, isSyncing: true } : prev));
+      } else if (msg.type === 'syncCompleted' || msg.type === 'syncError') {
+        setSyncProgress(null);
+        void refreshAll();
       } else if (
         msg.type === 'indexUpdated' ||
-        msg.type === 'syncCompleted' ||
-        msg.type === 'syncStarted' ||
-        msg.type === 'syncError'
+        msg.type === 'telegramPaired'
       ) {
         void refreshAll();
       }
@@ -165,6 +174,49 @@ export const App: React.FC = () => {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-6">
+        {(syncStatus?.isSyncing || syncProgress) && (
+          <div className="rounded-2xl border border-indigo-500/30 bg-slate-900/70 backdrop-blur-md p-5 space-y-3">
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-white">
+                  {syncProgress?.message || 'Đang đồng bộ dữ liệu...'}
+                </div>
+                {syncProgress?.currentPath && (
+                  <div className="text-xs text-slate-400 truncate mt-1 font-mono">
+                    {syncProgress.currentPath}
+                  </div>
+                )}
+              </div>
+              <div className="text-xs font-semibold text-indigo-300 shrink-0">
+                {syncProgress && syncProgress.total > 0
+                  ? `${syncProgress.current}/${syncProgress.total} (${syncProgress.percent}%)`
+                  : syncProgress?.phase === 'SCANNING'
+                    ? 'Quét...'
+                    : 'Đang xử lý...'}
+              </div>
+            </div>
+            <div className="h-2.5 w-full rounded-full bg-slate-800 overflow-hidden border border-slate-700/60">
+              <div
+                className="h-full bg-indigo-500 transition-all duration-300"
+                style={{
+                  width: `${
+                    syncProgress && syncProgress.total > 0
+                      ? Math.max(2, syncProgress.percent)
+                      : syncStatus?.isSyncing
+                        ? 100
+                        : 0
+                  }%`,
+                  opacity:
+                    syncProgress && syncProgress.total > 0 ? 1 : syncStatus?.isSyncing ? 0.35 : 0,
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Multi-Zone Sync Network Panel */}
+        <SyncZonesPanel config={config} onZonesUpdated={refreshAll} />
+
         {/* Current Sync Folder Card */}
         <div className="rounded-2xl border border-slate-800/80 bg-slate-900/60 backdrop-blur-md p-6 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-start gap-4 min-w-0">

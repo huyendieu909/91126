@@ -4,9 +4,56 @@ import type {
   FileSyncStatus,
   ListFileDiffResult,
   ListFileDocument,
+  ZonesRegistryDocument,
 } from './types.js';
 
 export const LIST_FILE_NAME = 'list-file.md';
+export const ZONES_REGISTRY_FILE_NAME = 'zones-registry.json';
+export const DEFAULT_ZONE_ID = 'default-zone';
+export const DEFAULT_ZONE_NAME = 'Vùng Mặc Định (Default)';
+
+export function slugifyZoneId(name: string): string {
+  const slug = name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return slug ? `zone-${slug}` : `zone-${Date.now()}`;
+}
+
+export function parseZonesRegistry(rawJson: string): ZonesRegistryDocument {
+  if (!rawJson || !rawJson.trim()) {
+    return { updatedAt: new Date(0).toISOString(), zones: [] };
+  }
+  try {
+    const parsed = JSON.parse(rawJson) as Partial<ZonesRegistryDocument>;
+    const zones = Array.isArray(parsed.zones)
+      ? parsed.zones.map((z) => ({
+          zoneId: String(z.zoneId ?? DEFAULT_ZONE_ID),
+          zoneName: String(z.zoneName ?? DEFAULT_ZONE_NAME),
+          description: z.description ? String(z.description) : undefined,
+          driveFolderId: String(z.driveFolderId ?? ''),
+          listFileDriveId: z.listFileDriveId ? String(z.listFileDriveId) : null,
+          createdAt: String(z.createdAt ?? new Date(0).toISOString()),
+          createdBy: String(z.createdBy ?? 'unknown'),
+          memberDevices: Array.isArray(z.memberDevices) ? z.memberDevices.map(String) : [],
+        }))
+      : [];
+    return {
+      updatedAt: String(parsed.updatedAt ?? new Date(0).toISOString()),
+      zones,
+    };
+  } catch {
+    return { updatedAt: new Date(0).toISOString(), zones: [] };
+  }
+}
+
+export function serializeZonesRegistry(doc: ZonesRegistryDocument): string {
+  return `${JSON.stringify(doc, null, 2)}\n`;
+}
 
 function escapeCell(value: string): string {
   return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');

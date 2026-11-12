@@ -52,17 +52,78 @@ export interface GoogleAuthInfo {
 
 export interface TelegramBotConfig {
   enabled: boolean;
+  pausedByUser?: boolean;
   botToken: string;
+  botUsername?: string | null;
   chatId: string;
+  chatTitle?: string | null;
   lastUpdateId: number;
+}
+
+export interface TelegramChatCandidate {
+  chatId: string;
+  title: string;
+  type: string;
+  username?: string;
+}
+
+export interface TelegramPairingSession {
+  pairCode: string;
+  botUsername: string;
+  deepLinkUrl: string;
+  groupInviteUrl: string;
+}
+
+/**
+ * Thông tin một Vùng Đồng Bộ (Sync Zone) lưu trên Google Drive (zones-registry.json)
+ */
+export interface SyncZoneMetadata {
+  zoneId: string;
+  zoneName: string;
+  description?: string;
+  /** ID thư mục riêng của Vùng này trên Google Drive */
+  driveFolderId: string;
+  /** ID file list-file.md riêng của Vùng này trên Google Drive */
+  listFileDriveId: string | null;
+  createdAt: string;
+  createdBy: string;
+  /** Danh sách tên các thiết bị đang tham gia (joined) vào Vùng đồng bộ này */
+  memberDevices: string[];
+}
+
+export interface ZonesRegistryDocument {
+  updatedAt: string;
+  zones: SyncZoneMetadata[];
+}
+
+/**
+ * Trạng thái liên kết Vùng Đồng Bộ trên từng thiết bị cụ thể (PC hoặc Android)
+ */
+export interface LocalZoneBinding {
+  zoneId: string;
+  zoneName: string;
+  description?: string;
+  /** Thiết bị hiện tại có đang bật tham gia đồng bộ Vùng này hay không */
+  joined: boolean;
+  /** Đường dẫn thư mục cục bộ trên PC hoặc SAF Directory URI trên Android */
+  localFolderPath: string | null;
+  driveFolderId: string | null;
+  listFileDriveId: string | null;
+  lastSyncedRevision: number;
+  lastSyncedAt: string | null;
+  memberDevices: string[];
 }
 
 export interface AppConfig {
   deviceId: string;
   deviceName: string;
-  /** Đường dẫn thư mục đồng bộ trên máy (null khi mở app lần đầu) */
+  /** Đường dẫn thư mục đồng bộ đang chọn (tương ứng với Vùng đang active) */
   syncFolderPath: string | null;
   lastSyncedRevision: number;
+  /** ID của Vùng đồng bộ đang được chọn hiển thị/active trên thiết bị */
+  activeZoneId?: string | null;
+  /** Danh sách các Vùng đồng bộ mà thiết bị biết hoặc đang tham gia */
+  zones?: LocalZoneBinding[];
   googleAuth: GoogleAuthInfo;
   telegramBot: TelegramBotConfig;
 }
@@ -80,7 +141,9 @@ export interface PublicAppConfig extends Omit<AppConfig, 'googleAuth' | 'telegra
   telegramBot: {
     enabled: boolean;
     hasToken: boolean;
+    botUsername?: string | null;
     chatId: string;
+    chatTitle?: string | null;
   };
 }
 
@@ -151,6 +214,25 @@ export interface SyncRunSummary {
   completedAt: string;
 }
 
+export type SyncProgressPhase =
+  | 'IDLE'
+  | 'SCANNING'
+  | 'PREPARING'
+  | 'UPLOADING'
+  | 'DOWNLOADING'
+  | 'DELETING'
+  | 'FINALIZING';
+
+export interface SyncProgress {
+  phase: SyncProgressPhase;
+  current: number;
+  total: number;
+  currentPath?: string | null;
+  message?: string;
+  /** 0-100 when total > 0 */
+  percent: number;
+}
+
 export interface SyncStatusSnapshot {
   isSyncing: boolean;
   cloudReady: boolean;
@@ -158,4 +240,5 @@ export interface SyncStatusSnapshot {
   lastSyncedRevision: number;
   lastError: string | null;
   lastSummary: SyncRunSummary | null;
+  progress: SyncProgress | null;
 }

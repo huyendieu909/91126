@@ -1,4 +1,14 @@
-import * as FileSystem from 'expo-file-system/legacy';
+import {
+  DEFAULT_ZONE_ID,
+  DEFAULT_ZONE_NAME,
+  type LocalZoneBinding,
+} from '@foldersync/shared';
+import {
+  getDefaultDesktopBridgeUrl,
+  getDefaultMobileDeviceName,
+  readRawMobileConfigJson,
+  writeRawMobileConfigJson,
+} from './platform-fs';
 
 export interface MobileAppState {
   deviceId: string;
@@ -8,6 +18,9 @@ export interface MobileAppState {
   lastSyncedRevision: number;
   lastSyncedAt: string | null;
   baselineHashes: Record<string, string>;
+  activeZoneId: string;
+  zones: LocalZoneBinding[];
+  zoneBaselines: Record<string, Record<string, string>>;
   desktopBridgeUrl: string;
   googleAuth: {
     clientId: string;
@@ -21,6 +34,7 @@ export interface MobileAppState {
   };
   telegramBot: {
     enabled: boolean;
+    pausedByUser?: boolean;
     botToken: string;
     chatId: string;
   };
@@ -30,18 +44,19 @@ const DEFAULT_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID ?? '';
 const DEFAULT_CLIENT_SECRET = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_SECRET ?? '';
 const DEFAULT_REDIRECT_URI = 'http://localhost:8384/api/auth/google/callback';
 
-const CONFIG_FILE_URI = `${FileSystem.documentDirectory ?? 'file:///data/local/tmp/'}foldersync-mobile-config.json`;
-
 function createDefaultState(): MobileAppState {
   const randomSuffix = Math.floor(1000 + Math.random() * 9000);
   return {
     deviceId: `android-${Date.now()}-${randomSuffix}`,
-    deviceName: 'Android-Phone',
+    deviceName: getDefaultMobileDeviceName(),
     syncDirectoryUri: null,
     lastSyncedRevision: 0,
     lastSyncedAt: null,
     baselineHashes: {},
-    desktopBridgeUrl: 'http://10.10.10.66:8384',
+    activeZoneId: DEFAULT_ZONE_ID,
+    zones: [],
+    zoneBaselines: {},
+    desktopBridgeUrl: getDefaultDesktopBridgeUrl(),
     googleAuth: {
       clientId: DEFAULT_CLIENT_ID,
       clientSecret: DEFAULT_CLIENT_SECRET,
@@ -62,18 +77,20 @@ function createDefaultState(): MobileAppState {
 
 export async function loadMobileConfig(): Promise<MobileAppState> {
   try {
-    const info = await FileSystem.getInfoAsync(CONFIG_FILE_URI);
-    if (!info.exists) {
+    const raw = await readRawMobileConfigJson();
+    if (!raw) {
       const fresh = createDefaultState();
       await saveMobileConfig(fresh);
       return fresh;
     }
-    const raw = await FileSystem.readAsStringAsync(CONFIG_FILE_URI);
     const parsed = JSON.parse(raw) as Partial<MobileAppState>;
     const defaults = createDefaultState();
-    return {
+    const merged: MobileAppState = {
       ...defaults,
       ...parsed,
+      activeZoneId: parsed.activeZoneId || DEFAULT_ZONE_ID,
+      zones: Array.isArray(parsed.zones) ? parsed.zones : [],
+      zoneBaselines: parsed.zoneBaselines ?? {},
       desktopBridgeUrl: parsed.desktopBridgeUrl || defaults.desktopBridgeUrl,
       googleAuth: {
         ...defaults.googleAuth,
@@ -83,13 +100,35 @@ export async function loadMobileConfig(): Promise<MobileAppState> {
       },
       telegramBot: { ...defaults.telegramBot, ...(parsed.telegramBot ?? {}) },
     };
+    if (
+      merged.telegramBot.botToken &&
+      merged.telegramBot.chatId &&
+      !merged.telegramBot.enabled &&
+      !merged.telegramBot.pausedByUser
+    ) {
+      merged.telegramBot.enabled = true;
+    }
+    if (merged.syncDirectoryUri && merged.zones.length === 0) {
+      merged.zones.push({
+        zoneId: DEFAULT_ZONE_ID,
+        zoneName: DEFAULT_ZONE_NAME,
+        joined: true,
+        localFolderPath: merged.syncDirectoryUri,
+        driveFolderId: merged.googleAuth.driveRootFolderId,
+        listFileDriveId: merged.googleAuth.listFileDriveId,
+        lastSyncedRevision: merged.lastSyncedRevision,
+        lastSyncedAt: merged.lastSyncedAt,
+        memberDevices: [merged.deviceName],
+      });
+    }
+    return merged;
   } catch {
     return createDefaultState();
   }
 }
 
 export async function saveMobileConfig(nextState: MobileAppState): Promise<void> {
-  await FileSystem.writeAsStringAsync(CONFIG_FILE_URI, JSON.stringify(nextState, null, 2));
+  await writeRawMobileConfigJson(JSON.stringify(nextState, null, 2));
 }
 
 /**
@@ -175,6 +214,7 @@ export async function syncAuthFromDesktopBridge(
       botToken: string;
       chatId: string;
     };
+    zones?: LocalZoneBinding[];
   };
 
   if (!payload.googleAuth?.accessToken && !payload.googleAuth?.refreshToken) {
@@ -183,9 +223,43 @@ export async function syncAuthFromDesktopBridge(
     );
   }
 
+  const localZonesMap = new Map<string, LocalZoneBinding>();
+  for (const z of currentState.zones ?? []) {
+    localZonesMap.set(z.zoneId, z);
+  }
+  for (const rz of payload.zones ?? []) {
+    const existing = localZonesMap.get(rz.zoneId);
+    if (existing) {
+      localZonesMap.set(rz.zoneId, {
+        ...existing,
+        zoneName: rz.zoneName || existing.zoneName,
+        description: rz.description ?? existing.description,
+        driveFolderId: rz.driveFolderId || existing.driveFolderId,
+        memberDevices: rz.memberDevices ?? existing.memberDevices,
+      });
+    } else {
+      localZonesMap.set(rz.zoneId, {
+        zoneId: rz.zoneId,
+        zoneName: rz.zoneName,
+        description: rz.description,
+        joined: false,
+        localFolderPath: null,
+        driveFolderId: rz.driveFolderId,
+        listFileDriveId: rz.listFileDriveId,
+        lastSyncedRevision: 0,
+        lastSyncedAt: null,
+        memberDevices: rz.memberDevices ?? [],
+      });
+    }
+  }
+
+  const nextBotToken = payload.telegramBot.botToken || currentState.telegramBot.botToken;
+  const nextChatId = payload.telegramBot.chatId || currentState.telegramBot.chatId;
+
   const updated: MobileAppState = {
     ...currentState,
     desktopBridgeUrl: baseUrl,
+    zones: [...localZonesMap.values()],
     googleAuth: {
       clientId: payload.googleAuth.clientId || currentState.googleAuth.clientId,
       clientSecret: payload.googleAuth.clientSecret || currentState.googleAuth.clientSecret,
@@ -197,9 +271,10 @@ export async function syncAuthFromDesktopBridge(
       listFileDriveId: payload.googleAuth.listFileDriveId,
     },
     telegramBot: {
-      enabled: payload.telegramBot.enabled,
-      botToken: payload.telegramBot.botToken || currentState.telegramBot.botToken,
-      chatId: payload.telegramBot.chatId || currentState.telegramBot.chatId,
+      enabled: Boolean(payload.telegramBot.enabled || (nextBotToken && nextChatId)),
+      pausedByUser: false,
+      botToken: nextBotToken,
+      chatId: nextChatId,
     },
   };
 

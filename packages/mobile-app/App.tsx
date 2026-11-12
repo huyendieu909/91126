@@ -5,8 +5,10 @@ import {
   FlatList,
   Linking,
   Modal,
+  Platform,
   SafeAreaView,
   ScrollView,
+  StatusBar as RNStatusBar,
   StyleSheet,
   Switch,
   Text,
@@ -25,6 +27,10 @@ import {
   type MobileAppState,
 } from './src/storage/mobile-config';
 import {
+  activateAndroidZone,
+  discoverAndroidZones,
+  joinOrCreateAndroidZone,
+  leaveAndroidZone,
   pickAndSwitchAndroidSyncFolder,
   runAndroidSyncNow,
   scanAndroidLocalFolder,
@@ -38,6 +44,8 @@ export default function App() {
   const [switchModalVisible, setSwitchModalVisible] = useState(false);
   const [switchMode, setSwitchMode] = useState<SwitchFolderMode>('POINT_ONLY');
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
+  const [zonesModalVisible, setZonesModalVisible] = useState(false);
+  const [newZoneName, setNewZoneName] = useState('');
   const [standaloneCodeInput, setStandaloneCodeInput] = useState('');
   const [showStandaloneBox, setShowStandaloneBox] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
@@ -218,15 +226,15 @@ export default function App() {
 
       {/* Header */}
       <View style={styles.header}>
-        <View>
+        <View style={styles.headerInfo}>
           <Text style={styles.headerTitle}>FolderSync</Text>
-          <Text style={styles.headerSub}>
+          <Text style={styles.headerSub} numberOfLines={2}>
             📱 {state.deviceName} · Rev #{doc?.revision ?? state.lastSyncedRevision} ·{' '}
             {isGoogleConnected ? `☁️ ${state.googleAuth.email || 'Đã kết nối'}` : '⚠️ Chưa kết nối'}
           </Text>
         </View>
         <TouchableOpacity
-          style={styles.secondaryBtn}
+          style={styles.headerSettingsBtn}
           onPress={() => setSettingsModalVisible(true)}
         >
           <Text style={styles.secondaryBtnText}>⚙️ Cài đặt</Text>
@@ -235,27 +243,36 @@ export default function App() {
 
       {/* Current Folder & Sync Trigger Card */}
       <View style={styles.card}>
-        <Text style={styles.sectionLabel}>THƯ MỤC ĐỒNG BỘ HIỆN TẠI</Text>
+        <Text style={styles.sectionLabel}>
+          VÙNG ĐỒNG BỘ HIỆN TẠI: {state.activeZoneId || 'default-zone'}
+        </Text>
         <Text style={styles.folderUri} numberOfLines={2}>
           {decodeURIComponent(state.syncDirectoryUri)}
         </Text>
 
+        <TouchableOpacity
+          style={styles.fullWidthPrimaryBtn}
+          disabled={syncing}
+          onPress={() => void handleSyncNow('MANUAL')}
+        >
+          <Text style={styles.primaryBtnText}>
+            {syncing ? '⏳ Đang đồng bộ...' : '🔄 Đồng bộ ngay'}
+          </Text>
+        </TouchableOpacity>
+
         <View style={styles.rowGap}>
           <TouchableOpacity
-            style={[styles.primaryBtn, { flex: 1 }]}
-            disabled={syncing}
-            onPress={() => void handleSyncNow('MANUAL')}
+            style={[styles.secondaryBtn, { flex: 1 }]}
+            onPress={() => setZonesModalVisible(true)}
           >
-            <Text style={styles.primaryBtnText}>
-              {syncing ? '⏳ Đang đồng bộ...' : '🔄 Đồng bộ ngay'}
-            </Text>
+            <Text style={styles.secondaryBtnText}>🌐 Vùng Sync</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={styles.secondaryBtn}
+            style={[styles.secondaryBtn, { flex: 1 }]}
             onPress={() => setSwitchModalVisible(true)}
           >
-            <Text style={styles.secondaryBtnText}>Đổi thư mục</Text>
+            <Text style={styles.secondaryBtnText}>📂 Đổi thư mục</Text>
           </TouchableOpacity>
         </View>
 
@@ -277,7 +294,7 @@ export default function App() {
           }
           renderItem={({ item }) => (
             <View style={styles.fileRow}>
-              <View style={{ flex: 1 }}>
+              <View style={{ flex: 1, marginRight: 8 }}>
                 <Text style={styles.fileName}>{item.relativePath}</Text>
                 <Text style={styles.fileMeta}>
                   Hash: {item.sha256.slice(0, 10)}... · Bởi: {item.updatedBy}
@@ -288,6 +305,143 @@ export default function App() {
           )}
         />
       </View>
+
+      {/* Multi-Zone Sync Network Modal */}
+      <Modal visible={zonesModalVisible} transparent animationType="slide">
+        <View style={styles.modalBackdrop}>
+          <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalCard}>
+            <Text style={styles.modalTitle}>🌐 Mạng Lưới Vùng Đồng Bộ</Text>
+              <Text style={styles.subtitle}>
+                Mỗi vùng là 1 thư mục đồng bộ riêng. Điện thoại có thể chọn tham gia hoặc rời khỏi bất kỳ vùng nào.
+              </Text>
+
+              <TouchableOpacity
+                style={[styles.secondaryBtn, { marginBottom: 12, alignItems: 'center' }]}
+                onPress={async () => {
+                  try {
+                    const updated = await discoverAndroidZones();
+                    setState(updated);
+                    setStatusMessage(`✅ Đã quét thấy ${updated.zones.length} vùng đồng bộ từ Cloud.`);
+                  } catch (err) {
+                    setStatusMessage(`❌ ${err instanceof Error ? err.message : 'Lỗi quét vùng'}`);
+                  }
+                }}
+              >
+                <Text style={styles.secondaryBtnText}>🔍 Quét Danh Sách Vùng Từ Cloud</Text>
+              </TouchableOpacity>
+
+              {(state.zones ?? []).map((z) => {
+                const isActive = z.zoneId === state.activeZoneId && z.joined;
+                return (
+                  <View
+                    key={z.zoneId}
+                    style={[
+                      styles.modeOption,
+                      isActive && styles.modeOptionSelected,
+                      { marginBottom: 10 },
+                    ]}
+                  >
+                    <Text style={styles.modeTitle}>
+                      {z.zoneName} ({z.zoneId}){' '}
+                      {isActive ? '✨ Đang chọn' : z.joined ? '✅ Đã tham gia' : '⚪ Chưa tham gia'}
+                    </Text>
+                    <Text style={styles.fileMeta}>
+                      Thành viên: {(z.memberDevices ?? []).join(', ') || 'Chưa có'}
+                    </Text>
+                    {z.joined && z.localFolderPath ? (
+                      <Text style={styles.fileMeta} numberOfLines={1}>
+                        📂 {decodeURIComponent(z.localFolderPath)}
+                      </Text>
+                    ) : null}
+
+                    <View style={[styles.rowGap, { marginTop: 8 }]}>
+                      {z.joined ? (
+                        <>
+                          {!isActive && (
+                            <TouchableOpacity
+                              style={[styles.primaryBtn, { flex: 1, paddingVertical: 8 }]}
+                              onPress={async () => {
+                                const updated = await activateAndroidZone(z.zoneId);
+                                setState(updated);
+                                await reloadLocalState();
+                                setZonesModalVisible(false);
+                              }}
+                            >
+                              <Text style={styles.primaryBtnText}>Xem Vùng Này</Text>
+                            </TouchableOpacity>
+                          )}
+                          <TouchableOpacity
+                            style={[styles.secondaryBtn, { paddingVertical: 8 }]}
+                            onPress={async () => {
+                              const updated = await leaveAndroidZone(z.zoneId);
+                              setState(updated);
+                              await reloadLocalState();
+                            }}
+                          >
+                            <Text style={styles.secondaryBtnText}>👋 Rời vùng</Text>
+                          </TouchableOpacity>
+                        </>
+                      ) : (
+                        <TouchableOpacity
+                          style={[styles.primaryBtn, { flex: 1, paddingVertical: 8 }]}
+                          onPress={async () => {
+                            const updated = await joinOrCreateAndroidZone({
+                              zoneId: z.zoneId,
+                              zoneName: z.zoneName,
+                              description: z.description,
+                            });
+                            if (updated) {
+                              setState(updated);
+                              await reloadLocalState();
+                              setZonesModalVisible(false);
+                            }
+                          }}
+                        >
+                          <Text style={styles.primaryBtnText}>
+                            🤝 Tham gia vùng (Chọn thư mục Android)
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
+                );
+              })}
+
+              <Text style={styles.label}>➕ Tạo Vùng Sync Mới Từ Điện Thoại</Text>
+              <TextInput
+                style={styles.input}
+                value={newZoneName}
+                onChangeText={setNewZoneName}
+                placeholder="VD: Ảnh Điện Thoại, Ghi Chú..."
+                placeholderTextColor="#64748b"
+              />
+              <TouchableOpacity
+                style={[styles.primaryBtn, { marginTop: 8 }]}
+                disabled={!newZoneName.trim()}
+                onPress={async () => {
+                  const name = newZoneName.trim();
+                  if (!name) return;
+                  const updated = await joinOrCreateAndroidZone({ zoneName: name });
+                  if (updated) {
+                    setNewZoneName('');
+                    setState(updated);
+                    await reloadLocalState();
+                    setZonesModalVisible(false);
+                  }
+                }}
+              >
+                <Text style={styles.primaryBtnText}>✨ Chọn thư mục & Tạo vùng mới</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.secondaryBtn, { marginTop: 14, alignItems: 'center' }]}
+                onPress={() => setZonesModalVisible(false)}
+              >
+                <Text style={styles.secondaryBtnText}>Đóng</Text>
+              </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </Modal>
 
       {/* Switch Sync Folder Modal (2 Modes) */}
       <Modal visible={switchModalVisible} transparent animationType="slide">
@@ -341,7 +495,7 @@ export default function App() {
       {/* Settings Modal (Google Auth & Telegram Bot) */}
       <Modal visible={settingsModalVisible} transparent animationType="slide">
         <View style={styles.modalBackdrop}>
-          <ScrollView contentContainerStyle={styles.modalCard}>
+          <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalCard}>
             <Text style={styles.modalTitle}>Cài Đặt Google & Telegram</Text>
 
             {isGoogleConnected ? (
@@ -417,7 +571,11 @@ export default function App() {
                 onValueChange={(val) =>
                   setState({
                     ...state,
-                    telegramBot: { ...state.telegramBot, enabled: val },
+                    telegramBot: {
+                      ...state.telegramBot,
+                      enabled: val,
+                      pausedByUser: !val,
+                    },
                   })
                 }
               />
@@ -474,12 +632,17 @@ export default function App() {
   );
 }
 
+const ANDROID_TOP_INSET =
+  Platform.OS === 'android' ? (RNStatusBar.currentHeight ?? 36) + 12 : 14;
+const ANDROID_BOTTOM_INSET = Platform.OS === 'android' ? 16 : 12;
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#020617',
     paddingHorizontal: 16,
-    paddingTop: 12,
+    paddingTop: ANDROID_TOP_INSET,
+    paddingBottom: ANDROID_BOTTOM_INSET,
   },
   centered: {
     flex: 1,
@@ -535,6 +698,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 14,
   },
+  headerInfo: {
+    flex: 1,
+    marginRight: 10,
+  },
+  headerSettingsBtn: {
+    backgroundColor: '#1e293b',
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    flexShrink: 0,
+  },
   headerTitle: {
     color: '#f8fafc',
     fontSize: 20,
@@ -573,6 +748,14 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   primaryBtn: {
+    backgroundColor: '#4f46e5',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+  },
+  fullWidthPrimaryBtn: {
+    width: '100%',
     backgroundColor: '#4f46e5',
     borderRadius: 14,
     paddingVertical: 12,
@@ -658,6 +841,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(2,6,23,0.85)',
     justifyContent: 'center',
     padding: 16,
+  },
+  modalScroll: {
+    maxHeight: '88%',
   },
   modalCard: {
     backgroundColor: '#0f172a',

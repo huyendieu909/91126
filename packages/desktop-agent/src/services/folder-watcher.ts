@@ -8,6 +8,7 @@ import { FileIndexer } from './file-indexer.js';
 
 export interface IndexUpdatedEvent {
   folderPath: string;
+  zoneId?: string;
   document: ListFileDocument;
 }
 
@@ -22,6 +23,11 @@ export class FolderWatcher extends EventEmitter {
   private debounceTimer: NodeJS.Timeout | null = null;
   private isScanning = false;
   private pendingRescan = false;
+  /** Additional watchers for non-active joined zones (resolvedPath -> { zoneId, watcher, timer }) */
+  private readonly extraZoneWatchers = new Map<
+    string,
+    { zoneId: string; watcher: FSWatcher; timer: NodeJS.Timeout | null }
+  >();
   private switchQueue: Promise<ListFileDocument> = Promise.resolve({
     lastUpdatedAt: new Date(0).toISOString(),
     updatedByDevice: 'None',
@@ -61,12 +67,104 @@ export class FolderWatcher extends EventEmitter {
     if (cfg.syncFolderPath && cfg.syncFolderPath.trim()) {
       await this.switchWatchedFolder(cfg.syncFolderPath);
     }
+    await this.syncWatchedZones();
   }
 
   public async stop(): Promise<void> {
     this.folderService.off('folderChanged', this.onFolderChangedBound);
     await this.switchQueue.catch(() => undefined);
     await this.closeCurrentWatcher();
+    await this.closeAllExtraWatchers();
+  }
+
+  /**
+   * Đồng bộ các bộ theo dõi chokidar cho TẤT CẢ các Vùng đang tham gia (joined: true)
+   */
+  public async syncWatchedZones(): Promise<void> {
+    await this.switchQueue.catch(() => undefined);
+    const cfg = await this.configService.loadConfig();
+    const activeResolved = this.currentWatchedFolder
+      ? path.resolve(this.currentWatchedFolder)
+      : cfg.syncFolderPath
+        ? path.resolve(cfg.syncFolderPath)
+        : null;
+
+    const desiredExtra = new Map<string, string>(); // resolvedPath -> zoneId
+    for (const z of cfg.zones ?? []) {
+      if (z.joined && z.localFolderPath && z.localFolderPath.trim()) {
+        const resPath = path.resolve(z.localFolderPath);
+        if (resPath !== activeResolved) {
+          desiredExtra.set(resPath, z.zoneId);
+        }
+      }
+    }
+
+    // Close removed/left extra watchers
+    for (const [resPath, entry] of [...this.extraZoneWatchers.entries()]) {
+      if (!desiredExtra.has(resPath)) {
+        if (entry.timer) clearTimeout(entry.timer);
+        this.extraZoneWatchers.delete(resPath);
+        await entry.watcher.close();
+      }
+    }
+
+    // Start new extra watchers for joined zones
+    for (const [resPath, zoneId] of desiredExtra.entries()) {
+      if (this.extraZoneWatchers.has(resPath)) {
+        this.extraZoneWatchers.get(resPath)!.zoneId = zoneId;
+        continue;
+      }
+
+      const watcher = chokidar.watch(resPath, {
+        ignoreInitial: true,
+        persistent: true,
+        ignored: (targetPath: string) => {
+          if (targetPath === resPath) return false;
+          const rel = path.relative(resPath, targetPath).replace(/\\/g, '/');
+          return this.fileIndexer.shouldIgnoreRelativePath(rel);
+        },
+      });
+
+      const holder: { zoneId: string; watcher: FSWatcher; timer: NodeJS.Timeout | null } = {
+        zoneId,
+        watcher,
+        timer: null,
+      };
+      this.extraZoneWatchers.set(resPath, holder);
+
+      const onExtraFsEvent = (affectedPath: string) => {
+        const rel = path.relative(resPath, affectedPath).replace(/\\/g, '/');
+        if (this.fileIndexer.shouldIgnoreRelativePath(rel)) return;
+        if (this.isPathLocked(rel)) return;
+
+        if (holder.timer) clearTimeout(holder.timer);
+        holder.timer = setTimeout(() => {
+          holder.timer = null;
+          void (async () => {
+            const latestCfg = await this.configService.loadConfig();
+            const { doc, changed } = await this.fileIndexer.scanAndSyncLocalListFile(
+              resPath,
+              latestCfg.deviceName,
+            );
+            if (changed) {
+              this.emit('indexUpdated', {
+                folderPath: resPath,
+                zoneId: holder.zoneId,
+                document: doc,
+              } satisfies IndexUpdatedEvent);
+            }
+          })();
+        }, this.debounceMs);
+      };
+
+      watcher.on('add', onExtraFsEvent);
+      watcher.on('change', onExtraFsEvent);
+      watcher.on('unlink', onExtraFsEvent);
+
+      await new Promise<void>((resolve) => {
+        watcher.once('ready', () => resolve());
+      });
+    }
   }
 
   public switchWatchedFolder(newFolderPath: string): Promise<ListFileDocument> {
@@ -207,5 +305,13 @@ export class FolderWatcher extends EventEmitter {
       this.watcher = null;
       await w.close();
     }
+  }
+
+  private async closeAllExtraWatchers(): Promise<void> {
+    for (const entry of this.extraZoneWatchers.values()) {
+      if (entry.timer) clearTimeout(entry.timer);
+      await entry.watcher.close();
+    }
+    this.extraZoneWatchers.clear();
   }
 }
