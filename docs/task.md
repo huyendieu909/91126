@@ -98,3 +98,28 @@
 - [x] **Task 14.1**: Cập nhật `ConfigService` và `SettingsModals.tsx` — hiển thị rõ kênh Telegram đã lưu (`chatId` + `hasToken`), hỗ trợ bật/tạm dừng 1-chạm và tự động kích hoạt `enabled: true` trên cấu hình hiện tại khi đủ khóa
 - [x] **Task 14.2**: Nâng cấp `TelegramService` và `SyncCoordinator` — gửi thông báo cho cả chiều **Đẩy lên (`uploaded`)** lẫn **Tải về (`downloaded`)** kèm tên Vùng đồng bộ, và ghi rõ kết quả/lỗi gửi Telegram vào bảng **Nhật ký hoạt động thời gian thực**
 - [x] **Task 14.3**: Đồng bộ thông báo Telegram 2 chiều trên `android-sync-engine.ts`, viết Unit/Integration Test kiểm chứng và kiểm tra gửi tin nhắn thực tế về `chatId: 8384943180`
+
+## Giai đoạn 15: Sửa Lỗi Hiển Thị Hộp Thoại Chọn Thư Mục & Tối Ưu Tốc Độ Duyệt Thư Mục
+- [x] **Task 15.1**: Dùng `createPortal(..., document.body)` cho `FolderBrowserModal.tsx` và modal tạo vùng trong `SyncZonesPanel.tsx` để thoát khỏi `backdrop-blur-md` containing block
+- [x] **Task 15.2**: Tối ưu `countExistingSyncableFiles` trong `FolderService` (bỏ qua thư mục ẩn/nặng và giới hạn độ sâu/số lượng khi duyệt `/api/fs/browse`), kiểm chứng build/test & khởi động lại daemon `:8384`
+
+## Giai đoạn 16: Sửa Lỗi Ghi Đè Thư Mục Giữa Các Vùng & Tách Biệt Bảng Chỉ Mục Theo Vùng
+- [x] **Task 16.1**: Sửa `FolderService.switchSyncFolder` (`skipConfigSave`) và `SyncCoordinator.createZone` / `joinZone` không ghi đè `localFolderPath` của vùng cũ + chặn trùng thư mục giữa các vùng + viết test kiểm chứng
+- [x] **Task 16.2**: Hỗ trợ `GET /api/index?zoneId=...` ở `server.ts` và thêm bộ chọn/hiển thị Vùng tách biệt ngay trên `ListFileTable.tsx`
+- [x] **Task 16.3**: Build/test toàn bộ workspace, khôi phục đường dẫn `default-zone` trên cấu hình máy hiện tại về `/home/quyhx/Downloads/linhtinh/test-sync-folder` và khởi động lại daemon `:8384`
+
+## Giai đoạn 17: Đồng Bộ An Toàn Đa Vùng Trên Mobile App
+- [x] **Task 17.1**: Chặn chọn trùng thư mục SAF giữa các vùng khác nhau trong `joinOrCreateAndroidZone` (`android-sync-engine.ts`) và hiển thị tên Vùng đang xem trên tiêu đề danh sách file (`App.tsx`) + kiểm chứng typecheck `mobile-app`
+
+## Giai đoạn 18: Sửa Lỗi Race Condition Khi Chọn Thư Mục Vùng Mới Trên Android Thật
+- [x] **Task 18.1**: Khóa `APP_FOREGROUND` sync trong lúc mở Android SAF Picker / thao tác vùng (`App.tsx`), chống ghi đè config cũ cuối `runAndroidSyncNow` (`android-sync-engine.ts`), và tự đồng bộ vùng mới sau khi tham gia/tạo xong + kiểm chứng `tsc --noEmit`
+
+## Giai đoạn 19: Nâng Cấp Toàn Diện Giao Diện Mobile App (`App.tsx`)
+- [x] **Task 19.1**: Thêm helper format đường dẫn SAF thân thiện (`formatDisplayFolderPath`), format dung lượng file (`formatBytes`), icon phân loại file (`getFileEmoji`) và kiểm tra tương thích `rn-web-shim.tsx`
+- [x] **Task 19.2**: Thiết kế lại Header (Badge Cloud + Rev), thanh **Zone Pills cuộn ngang** đổi vùng 1-chạm, Banner trạng thái có màu, và **Danh sách File** (Search + Pull-to-Refresh + nút `✕` đóng Modal)
+- [x] **Task 19.3**: Kiểm chứng `tsc --noEmit` cho `@foldersync/mobile-app` và kiểm tra hiển thị trên Mobile Web Simulator (`:8390`)
+
+## Giai đoạn 20: Quản Lý & Mở File Trực Tiếp Trên Mobile App
+- [x] **Task 20.1**: Bổ sung `renamePlatformFile`, `openPlatformFileExternal` và hỗ trợ đọc/mở file trên `platform-fs.ts` + `rn-web-shim.tsx` (`Image` component)
+- [x] **Task 20.2**: Nâng cấp `App.tsx` với In-App File Viewer (xem ảnh, đọc & sửa/lưu file text/markdown), menu thao tác `⋮` / giữ lâu (Mở / Đổi tên / Xóa), nút `+ Tạo file` mới và chế độ duyệt thư mục con (Breadcrumb)
+- [x] **Task 20.3**: Kiểm chứng `tsc --noEmit` cho `@foldersync/mobile-app` và kiểm tra toàn bộ workspace build/test

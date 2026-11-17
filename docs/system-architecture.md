@@ -248,6 +248,17 @@ flowchart TD
 
 ---
 
+### 4.7. Tách Biệt Chỉ Mục Theo Vùng & Trình Quản Lý File Trên Mobile
+
+1. **Tách biệt chỉ mục & an toàn đường dẫn vùng trên PC (`Web UI` & `Desktop Agent`)**:
+   - [`FolderService.switchSyncFolder`](file:///home/quyhx/Downloads/tmp/91126/packages/desktop-agent/src/services/folder-service.ts) hỗ trợ `skipConfigSave` khi khởi tạo/tham gia vùng mới và [`SyncCoordinator`](file:///home/quyhx/Downloads/tmp/91126/packages/desktop-agent/src/services/sync-coordinator.ts) kiểm tra `assertFolderNotBoundToOtherZone` để các vùng không bao giờ ghi đè `list-file.md` lẫn nhau.
+   - `GET /api/index?zoneId=...` và [`ListFileTable`](file:///home/quyhx/Downloads/tmp/91126/packages/web-ui/src/components/ListFileTable.tsx) hiển thị bảng chỉ mục tách riêng theo từng vùng; [`FolderBrowserModal`](file:///home/quyhx/Downloads/tmp/91126/packages/web-ui/src/components/FolderBrowserModal.tsx) render qua `createPortal` kèm tối ưu giới hạn đệ quy `countExistingSyncableFiles`.
+2. **Giao diện & Quản lý file trực tiếp trên Mobile ([`App.tsx`](file:///home/quyhx/Downloads/tmp/91126/packages/mobile-app/App.tsx) & [`platform-fs.ts`](file:///home/quyhx/Downloads/tmp/91126/packages/mobile-app/src/storage/platform-fs.ts))**:
+   - Khóa `APP_FOREGROUND` auto-sync trong lúc mở Android SAF Picker để tránh xung đột ghi đè cấu hình vùng mới.
+   - Thanh chuyển vùng nhanh 1-chạm (Zone Pills), format đường dẫn SAF thân thiện, tìm kiếm, Pull-to-Refresh, duyệt thư mục con theo Breadcrumb, In-App Viewer/Editor (xem ảnh, đọc & sửa file `.md`/`.txt`), tạo mới, đổi tên và xóa file trực tiếp.
+
+---
+
 ## 5. Danh Mục Các Package & File Quan Trọng
 
 | Package | File chính | Vai trò |
