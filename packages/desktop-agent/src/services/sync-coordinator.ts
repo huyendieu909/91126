@@ -57,7 +57,7 @@ export class SyncCoordinator extends EventEmitter {
   private readonly logs: SyncLogEntry[] = [];
   private readonly maxLogs = 150;
   private readonly stateFilePath: string;
-  private readonly transferConcurrency = 3;
+  private readonly transferConcurrency = 8;
 
   private readonly onIndexUpdatedBound: (evt: IndexUpdatedEvent) => void;
   private readonly onFolderChangedBound: (evt: FolderChangedEvent) => void;
@@ -459,6 +459,29 @@ export class SyncCoordinator extends EventEmitter {
     return mergedZones;
   }
 
+  private assertFolderNotBoundToOtherZone(
+    rawPath: string,
+    strategy: ExistingDataStrategy | undefined,
+    targetZoneId: string,
+    zones: LocalZoneBinding[],
+  ): void {
+    const rawResolved = path.resolve(rawPath);
+    const effectivePath =
+      strategy === 'CREATE_SUBFOLDER' ? path.join(rawResolved, 'FolderSync') : rawResolved;
+    const conflict = zones.find(
+      (z) =>
+        z.zoneId !== targetZoneId &&
+        z.joined &&
+        z.localFolderPath &&
+        path.resolve(z.localFolderPath) === effectivePath,
+    );
+    if (conflict) {
+      throw new Error(
+        `Thư mục "${effectivePath}" đang được sử dụng bởi vùng "${conflict.zoneName}" (${conflict.zoneId}). Vui lòng chọn thư mục khác để tránh ghi đè list-file.md.`,
+      );
+    }
+  }
+
   public async createZone(params: {
     zoneName: string;
     description?: string;
@@ -470,6 +493,13 @@ export class SyncCoordinator extends EventEmitter {
     const existingIds = new Set((cfg.zones ?? []).map((z) => z.zoneId));
     const zoneId = existingIds.has(baseSlug) ? `${baseSlug}-${Date.now().toString(36)}` : baseSlug;
 
+    this.assertFolderNotBoundToOtherZone(
+      params.localFolderPath,
+      params.existingDataStrategy,
+      zoneId,
+      cfg.zones ?? [],
+    );
+
     // Switch/prepare local folder with existing data protection strategy
     this.suppressFolderSwitchEvent = true;
     let finalLocalPath = params.localFolderPath;
@@ -480,6 +510,7 @@ export class SyncCoordinator extends EventEmitter {
         params.localFolderPath,
         'POINT_ONLY',
         params.existingDataStrategy ?? 'MERGE_ALL',
+        { skipConfigSave: true },
       );
       finalLocalPath = switchRes.newPath;
 
@@ -543,6 +574,8 @@ export class SyncCoordinator extends EventEmitter {
         `✨ Đã tạo vùng đồng bộ mới "${newBinding.zoneName}" (${zoneId}) tại "${finalLocalPath}".`,
       );
 
+      await this.folderWatcher.switchWatchedFolder(finalLocalPath);
+      await this.folderWatcher.switchWatchedFolder(finalLocalPath);
       await this.folderWatcher.syncWatchedZones();
     } finally {
       this.suppressFolderSwitchEvent = false;
@@ -565,6 +598,13 @@ export class SyncCoordinator extends EventEmitter {
     const cfg = await this.configService.loadConfig();
     const existing = (cfg.zones ?? []).find((z) => z.zoneId === params.zoneId);
 
+    this.assertFolderNotBoundToOtherZone(
+      params.localFolderPath,
+      params.existingDataStrategy,
+      params.zoneId,
+      cfg.zones ?? [],
+    );
+
     this.suppressFolderSwitchEvent = true;
     let joinedBinding: LocalZoneBinding;
     let cloudReady = false;
@@ -573,6 +613,7 @@ export class SyncCoordinator extends EventEmitter {
         params.localFolderPath,
         'POINT_ONLY',
         params.existingDataStrategy ?? 'MERGE_ALL',
+        { skipConfigSave: true },
       );
       const finalLocalPath = switchRes.newPath;
 
@@ -627,6 +668,7 @@ export class SyncCoordinator extends EventEmitter {
         `🤝 Đã tham gia vùng đồng bộ "${joinedBinding.zoneName}" (${params.zoneId}) -> "${finalLocalPath}".`,
       );
 
+      await this.folderWatcher.switchWatchedFolder(finalLocalPath);
       await this.folderWatcher.syncWatchedZones();
     } finally {
       this.suppressFolderSwitchEvent = false;

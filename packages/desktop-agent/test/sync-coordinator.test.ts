@@ -311,6 +311,19 @@ describe('Phase 4: Multi-Device SyncCoordinator (list-file.md + Cloud + Telegram
     expect(createdZone.joined).toBe(true);
     expect(sharedCloud.getStoredFileCount('zone-work-docs')).toBe(1);
 
+    // Ensure default-zone preserved its original localFolderPath (regression check)
+    const cfgAfterCreate = await nodeA.configService.loadConfig();
+    const defaultZoneA = cfgAfterCreate.zones?.find((z) => z.zoneId === 'default-zone');
+    expect(defaultZoneA?.localFolderPath).toBe(nodeA.syncDir);
+
+    // Ensure binding a new zone to a folder already used by another zone is rejected
+    await expect(
+      nodeA.coordinator.createZone({
+        zoneName: 'Duplicate Folder Zone',
+        localFolderPath: workDirA,
+      }),
+    ).rejects.toThrow(/đang được sử dụng bởi vùng/);
+
     // 2. Node C (Android-Phone) is only in default-zone and does NOT join zone-work-docs
     const nodeC = await createNode('Android-Phone', 'node-c-zone', async () => {
       return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });

@@ -8,11 +8,14 @@ import {
   CheckCircle2,
   RefreshCw,
 } from 'lucide-react';
-import type { ListFileDocument } from '@foldersync/shared';
+import type { ListFileDocument, LocalZoneBinding } from '@foldersync/shared';
 
 interface ListFileTableProps {
   document: ListFileDocument | null;
   markdown: string;
+  zones?: LocalZoneBinding[];
+  selectedZoneId?: string | null;
+  onSelectZone?: (zoneId: string) => void;
   onRescan: () => Promise<void>;
 }
 
@@ -27,8 +30,16 @@ function formatBytes(bytes: number): string {
 export const ListFileTable: React.FC<ListFileTableProps> = ({
   document,
   markdown,
+  zones = [],
+  selectedZoneId,
+  onSelectZone,
   onRescan,
 }) => {
+  const joinedZones = useMemo(() => zones.filter((z) => z.joined), [zones]);
+  const activeZoneLabel = useMemo(() => {
+    const found = joinedZones.find((z) => z.zoneId === selectedZoneId);
+    return found ? `${found.zoneName} (${found.zoneId})` : selectedZoneId || null;
+  }, [joinedZones, selectedZoneId]);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'DELETED'>('ALL');
   const [rawView, setRawView] = useState(false);
@@ -66,11 +77,31 @@ export const ListFileTable: React.FC<ListFileTableProps> = ({
             <FileText className="w-5 h-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2.5">
               <h2 className="text-base font-semibold text-white">Bảng chỉ mục list-file.md</h2>
               <span className="px-2 py-0.5 rounded-md text-xs font-mono bg-slate-800 text-indigo-300 border border-slate-700">
                 Rev #{document?.revision ?? 0}
               </span>
+              {joinedZones.length > 1 && onSelectZone ? (
+                <select
+                  value={selectedZoneId ?? ''}
+                  onChange={(e) => onSelectZone(e.target.value)}
+                  className="rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-2.5 py-1 text-xs font-medium text-indigo-200 focus:border-indigo-400 focus:outline-none"
+                  title="Chuyển xem bảng chỉ mục của từng vùng đồng bộ"
+                >
+                  {joinedZones.map((z) => (
+                    <option key={z.zoneId} value={z.zoneId} className="bg-slate-900 text-slate-100">
+                      Vùng: {z.zoneName} ({z.zoneId})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                activeZoneLabel && (
+                  <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                    Vùng: {activeZoneLabel}
+                  </span>
+                )
+              )}
             </div>
             <p className="text-xs text-slate-400">
               Đang hoạt động: <strong className="text-emerald-400">{activeCount}</strong> file · Đã xóa:{' '}

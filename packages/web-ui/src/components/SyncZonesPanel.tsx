@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Globe,
   Plus,
@@ -255,69 +256,71 @@ export const SyncZonesPanel: React.FC<SyncZonesPanelProps> = ({ config, onZonesU
       )}
 
       {/* Create Zone Modal */}
-      {createModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-6 space-y-4 shadow-2xl">
-            <h3 className="text-base font-bold text-white">➕ Tạo Vùng Đồng Bộ Mới</h3>
-            <p className="text-xs text-slate-400">
-              Tạo một vùng đồng bộ độc lập trên Google Drive. Các thiết bị khác sẽ nhìn thấy vùng này và có thể tự chọn tham gia.
-            </p>
+      {createModalOpen &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+            <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-6 space-y-4 shadow-2xl">
+              <h3 className="text-base font-bold text-white">➕ Tạo Vùng Đồng Bộ Mới</h3>
+              <p className="text-xs text-slate-400">
+                Tạo một vùng đồng bộ độc lập trên Google Drive. Các thiết bị khác sẽ nhìn thấy vùng này và có thể tự chọn tham gia.
+              </p>
 
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Tên Vùng Đồng Bộ *
-                </label>
-                <input
-                  type="text"
-                  value={newZoneName}
-                  onChange={(e) => setNewZoneName(e.target.value)}
-                  placeholder="VD: Tài liệu Công việc, Ảnh Điện thoại..."
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
-                />
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Tên Vùng Đồng Bộ *
+                  </label>
+                  <input
+                    type="text"
+                    value={newZoneName}
+                    onChange={(e) => setNewZoneName(e.target.value)}
+                    placeholder="VD: Tài liệu Công việc, Ảnh Điện thoại..."
+                    className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Mô tả ngắn (tùy chọn)
+                  </label>
+                  <input
+                    type="text"
+                    value={newZoneDesc}
+                    onChange={(e) => setNewZoneDesc(e.target.value)}
+                    placeholder="VD: Chỉ đồng bộ giữa Laptop Linux và PC Windows"
+                    className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Mô tả ngắn (tùy chọn)
-                </label>
-                <input
-                  type="text"
-                  value={newZoneDesc}
-                  onChange={(e) => setNewZoneDesc(e.target.value)}
-                  placeholder="VD: Chỉ đồng bộ giữa Laptop Linux và PC Windows"
-                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
-                />
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  onClick={() => setCreateModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300"
+                >
+                  Hủy
+                </button>
+                <button
+                  disabled={!newZoneName.trim()}
+                  onClick={() => {
+                    const name = newZoneName.trim();
+                    const desc = newZoneDesc.trim() || undefined;
+                    setCreateModalOpen(false);
+                    setFolderPickerTarget({
+                      type: 'CREATE',
+                      zoneName: name,
+                      description: desc,
+                    });
+                  }}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white"
+                >
+                  Tiếp tục: Chọn thư mục trên máy
+                </button>
               </div>
             </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                onClick={() => setCreateModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300"
-              >
-                Hủy
-              </button>
-              <button
-                disabled={!newZoneName.trim()}
-                onClick={() => {
-                  const name = newZoneName.trim();
-                  const desc = newZoneDesc.trim() || undefined;
-                  setCreateModalOpen(false);
-                  setFolderPickerTarget({
-                    type: 'CREATE',
-                    zoneName: name,
-                    description: desc,
-                  });
-                }}
-                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white"
-              >
-                Tiếp tục: Chọn thư mục trên máy
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
 
       {/* Folder Picker for Creating or Joining a Zone */}
       <FolderBrowserModal

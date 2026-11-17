@@ -136,36 +136,54 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
         return;
       }
 
-      // GET /api/index
+      // GET /api/index (?zoneId=...)
       if (req.method === 'GET' && pathname === '/api/index') {
         const cfg = await ctx.configService.loadConfig();
-        if (!cfg.syncFolderPath) {
+        const requestedZoneId = reqUrl.searchParams.get('zoneId')?.trim();
+        const activeZoneId = cfg.activeZoneId || 'default-zone';
+        const targetZone = requestedZoneId
+          ? (cfg.zones ?? []).find((z) => z.zoneId === requestedZoneId && z.joined)
+          : (cfg.zones ?? []).find((z) => z.zoneId === activeZoneId && z.joined);
+        const targetFolderPath = targetZone?.localFolderPath || (requestedZoneId ? null : cfg.syncFolderPath);
+
+        if (!targetFolderPath) {
           sendJson(res, 200, {
             configured: false,
             document: null,
             markdown: '',
+            zoneId: requestedZoneId || activeZoneId,
+            zoneName: targetZone?.zoneName ?? null,
           });
           return;
         }
-        const doc = await indexer.readLocalListFile(cfg.syncFolderPath);
+        const doc = await indexer.readLocalListFile(targetFolderPath);
         sendJson(res, 200, {
           configured: true,
           document: doc,
           markdown: serializeListFile(doc),
+          zoneId: targetZone?.zoneId ?? activeZoneId,
+          zoneName: targetZone?.zoneName ?? null,
         });
         return;
       }
 
-      // POST /api/index/rescan
+      // POST /api/index/rescan (?zoneId=...)
       if (req.method === 'POST' && pathname === '/api/index/rescan') {
         const cfg = await ctx.configService.loadConfig();
-        if (!cfg.syncFolderPath) {
+        const requestedZoneId = reqUrl.searchParams.get('zoneId')?.trim();
+        const targetZone = requestedZoneId
+          ? (cfg.zones ?? []).find((z) => z.zoneId === requestedZoneId && z.joined)
+          : null;
+        const targetFolderPath = targetZone?.localFolderPath || cfg.syncFolderPath;
+
+        if (!targetFolderPath) {
           sendJson(res, 400, { error: 'Chưa chọn thư mục đồng bộ.' });
           return;
         }
-        const doc = ctx.folderWatcher
-          ? await ctx.folderWatcher.triggerScanNow()
-          : (await indexer.scanAndSyncLocalListFile(cfg.syncFolderPath, cfg.deviceName)).doc;
+        const doc =
+          ctx.folderWatcher && targetFolderPath === cfg.syncFolderPath
+            ? await ctx.folderWatcher.triggerScanNow()
+            : (await indexer.scanAndSyncLocalListFile(targetFolderPath, cfg.deviceName)).doc;
 
         sendJson(res, 200, {
           document: doc,

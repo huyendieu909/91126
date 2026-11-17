@@ -80,7 +80,11 @@ export class FolderService extends EventEmitter {
 
     directories.sort((a, b) => a.name.localeCompare(b.name));
 
-    const existingFilesCount = await this.countExistingSyncableFiles(resolvedPath);
+    const existingFilesCount = await this.countExistingSyncableFiles(resolvedPath, {
+      maxCount: 100,
+      maxDepth: 2,
+      skipHiddenAndHeavy: true,
+    });
     const parsed = path.parse(resolvedPath);
     const parentPath = parsed.root === resolvedPath ? null : path.dirname(resolvedPath);
     const roots = await this.getSystemRoots();
@@ -108,6 +112,7 @@ export class FolderService extends EventEmitter {
     newPathInput: string,
     mode: SwitchFolderMode = 'POINT_ONLY',
     existingDataStrategy: ExistingDataStrategy = 'MERGE_ALL',
+    options?: { skipConfigSave?: boolean },
   ): Promise<SwitchFolderResult> {
     if (!newPathInput || !newPathInput.trim()) {
       throw new Error('Đường dẫn thư mục đồng bộ không được để trống.');
@@ -156,7 +161,9 @@ export class FolderService extends EventEmitter {
       }
     }
 
-    await this.configService.saveConfig({ syncFolderPath: newPath });
+    if (!options?.skipConfigSave) {
+      await this.configService.saveConfig({ syncFolderPath: newPath });
+    }
 
     const result: SwitchFolderResult = {
       previousPath,
@@ -168,15 +175,31 @@ export class FolderService extends EventEmitter {
       isolatedBackupPath,
     };
 
-    this.emit('folderChanged', result satisfies FolderChangedEvent);
+    if (!options?.skipConfigSave) {
+      this.emit('folderChanged', result satisfies FolderChangedEvent);
+    }
     return result;
   }
 
-  public async countExistingSyncableFiles(dirPath: string): Promise<number> {
+  public async countExistingSyncableFiles(
+    dirPath: string,
+    options?: {
+      maxCount?: number;
+      maxDepth?: number;
+      currentDepth?: number;
+      skipHiddenAndHeavy?: boolean;
+    },
+  ): Promise<number> {
+    const maxCount = options?.maxCount ?? Number.POSITIVE_INFINITY;
+    const maxDepth = options?.maxDepth ?? Number.POSITIVE_INFINITY;
+    const currentDepth = options?.currentDepth ?? 0;
+    const skipHiddenAndHeavy = options?.skipHiddenAndHeavy ?? false;
+
     try {
       const entries = await fs.readdir(dirPath, { withFileTypes: true });
       let count = 0;
       for (const entry of entries) {
+        if (count >= maxCount) break;
         if (
           entry.name === LIST_FILE_NAME ||
           entry.name === '.sync_tmp' ||
@@ -188,9 +211,26 @@ export class FolderService extends EventEmitter {
         ) {
           continue;
         }
+        if (
+          skipHiddenAndHeavy &&
+          (entry.name.startsWith('.') ||
+            entry.name === 'node_modules' ||
+            entry.name === 'proc' ||
+            entry.name === 'sys' ||
+            entry.name === 'dev')
+        ) {
+          continue;
+        }
         const fullPath = path.join(dirPath, entry.name);
         if (entry.isDirectory()) {
-          count += await this.countExistingSyncableFiles(fullPath);
+          if (currentDepth < maxDepth) {
+            count += await this.countExistingSyncableFiles(fullPath, {
+              maxCount: maxCount - count,
+              maxDepth,
+              currentDepth: currentDepth + 1,
+              skipHiddenAndHeavy,
+            });
+          }
         } else if (entry.isFile()) {
           count += 1;
         }

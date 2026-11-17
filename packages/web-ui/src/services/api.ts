@@ -34,6 +34,8 @@ export interface IndexResponse {
   configured: boolean;
   document: ListFileDocument | null;
   markdown: string;
+  zoneId?: string | null;
+  zoneName?: string | null;
 }
 
 export const api = {
@@ -85,12 +87,14 @@ export const api = {
     );
   },
 
-  getIndex(): Promise<IndexResponse> {
-    return requestJson<IndexResponse>('/api/index');
+  getIndex(zoneId?: string): Promise<IndexResponse> {
+    const q = zoneId ? `?zoneId=${encodeURIComponent(zoneId)}` : '';
+    return requestJson<IndexResponse>(`/api/index${q}`);
   },
 
-  rescanIndex(): Promise<{ document: ListFileDocument; markdown: string }> {
-    return requestJson<{ document: ListFileDocument; markdown: string }>('/api/index/rescan', {
+  rescanIndex(zoneId?: string): Promise<{ document: ListFileDocument; markdown: string }> {
+    const q = zoneId ? `?zoneId=${encodeURIComponent(zoneId)}` : '';
+    return requestJson<{ document: ListFileDocument; markdown: string }>(`/api/index/rescan${q}`, {
       method: 'POST',
     });
   },

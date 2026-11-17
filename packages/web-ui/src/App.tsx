@@ -34,12 +34,29 @@ export const App: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [folderModalOpen, setFolderModalOpen] = useState(false);
   const [triggeringSync, setTriggeringSync] = useState(false);
+  const [viewedZoneId, setViewedZoneId] = useState<string | null>(null);
+  const lastActiveZoneRef = React.useRef<string | null>(null);
 
-  const refreshAll = useCallback(async () => {
+  const refreshAll = useCallback(async (overrideZoneId?: string | null) => {
     try {
-      const [cfg, idx, status, logsRes] = await Promise.all([
-        api.getConfig(),
-        api.getIndex(),
+      const cfg = await api.getConfig();
+      const cfgActiveZone = cfg.activeZoneId || 'default-zone';
+      let effectiveZoneId =
+        overrideZoneId !== undefined ? overrideZoneId : viewedZoneId;
+
+      if (
+        overrideZoneId === undefined &&
+        lastActiveZoneRef.current !== null &&
+        lastActiveZoneRef.current !== cfgActiveZone
+      ) {
+        effectiveZoneId = cfgActiveZone;
+        setViewedZoneId(null);
+      }
+      lastActiveZoneRef.current = cfgActiveZone;
+
+      const targetIndexZone = effectiveZoneId || cfgActiveZone;
+      const [idx, status, logsRes] = await Promise.all([
+        api.getIndex(targetIndexZone),
         api.getSyncStatus(),
         api.getSyncLogs(),
       ]);
@@ -52,7 +69,7 @@ export const App: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [viewedZoneId]);
 
   useEffect(() => {
     void refreshAll();
@@ -262,8 +279,15 @@ export const App: React.FC = () => {
         <ListFileTable
           document={indexDoc}
           markdown={indexMarkdown}
+          zones={config.zones}
+          selectedZoneId={viewedZoneId || config.activeZoneId || 'default-zone'}
+          onSelectZone={(nextZoneId) => {
+            setViewedZoneId(nextZoneId);
+            void refreshAll(nextZoneId);
+          }}
           onRescan={async () => {
-            const res = await api.rescanIndex();
+            const targetZone = viewedZoneId || config.activeZoneId || undefined;
+            const res = await api.rescanIndex(targetZone);
             setIndexDoc(res.document);
             setIndexMarkdown(res.markdown);
           }}
