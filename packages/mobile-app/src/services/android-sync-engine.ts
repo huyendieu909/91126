@@ -13,6 +13,8 @@ import {
   type ListFileDocument,
   type LocalZoneBinding,
   type SwitchFolderMode,
+  type SyncProgress,
+  type SyncProgressPhase,
   type SyncRunSummary,
   type ZonesRegistryDocument,
 } from '@foldersync/shared';
@@ -37,6 +39,35 @@ import {
 const DRIVE_FILES_API = 'https://www.googleapis.com/drive/v3/files';
 const DRIVE_UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3/files';
 const WORKSPACE_FOLDER_NAME = '.FolderSync_Workspace';
+const TRANSFER_CONCURRENCY = 8;
+
+function makeProgress(
+  phase: SyncProgressPhase,
+  current = 0,
+  total = 0,
+  currentPath?: string | null,
+  message?: string,
+): SyncProgress {
+  const percent = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+  return { phase, current, total, currentPath, message, percent };
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  let nextIndex = 0;
+  const runners = Array.from({ length: limit }, async () => {
+    while (nextIndex < items.length) {
+      const idx = nextIndex++;
+      await worker(items[idx], idx);
+    }
+  });
+  await Promise.all(runners);
+}
 
 export async function pickAndSwitchAndroidSyncFolder(
   mode: SwitchFolderMode,
@@ -117,19 +148,21 @@ export async function scanAndroidLocalFolder(
     prevMap.set(e.relativePath, e);
   }
 
-  const nextEntries: FileIndexEntry[] = [];
   const seen = new Set<string>();
+  const names = [...fileContentsB64.keys()];
+  const hashedEntries = new Array<FileIndexEntry | null>(names.length);
 
-  for (const [name, base64Content] of fileContentsB64.entries()) {
-    seen.add(name);
+  await runWithConcurrency(names, 6, async (name, idx) => {
+    const base64Content = fileContentsB64.get(name);
+    if (base64Content == null) return;
     const sha256 = await computeSha256HexFromBase64(base64Content);
     const exactSize = base64ToUint8Array(base64Content).byteLength;
     const prev = prevMap.get(name);
 
     if (prev && prev.status === 'ACTIVE' && prev.sha256 === sha256) {
-      nextEntries.push(prev);
+      hashedEntries[idx] = prev;
     } else {
-      nextEntries.push({
+      hashedEntries[idx] = {
         relativePath: name,
         sha256,
         size: exactSize,
@@ -138,8 +171,17 @@ export async function scanAndroidLocalFolder(
         updatedBy: deviceName,
         driveFileId: '-',
         syncedDevices: [deviceName],
-      });
+      };
     }
+  });
+
+  const nextEntries: FileIndexEntry[] = [];
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    const entry = hashedEntries[i];
+    if (!entry) continue;
+    seen.add(name);
+    nextEntries.push(entry);
   }
 
   const nowIso = new Date().toISOString();
@@ -361,6 +403,14 @@ export async function joinOrCreateAndroidZone(params: {
   }
   const initialState = await loadMobileConfig();
   const zoneId = params.zoneId || slugifyZoneId(params.zoneName);
+  const duplicateZone = (initialState.zones ?? []).find(
+    (z) => z.zoneId !== zoneId && z.joined && z.localFolderPath === folderUri,
+  );
+  if (duplicateZone) {
+    throw new Error(
+      `Thư mục này đang được gắn cho vùng "${duplicateZone.zoneName}" (${duplicateZone.zoneId}). Hãy chọn thư mục khác để tránh xung đột list-file.md.`,
+    );
+  }
   let driveFolderId: string | null = null;
 
   try {
@@ -471,178 +521,248 @@ export async function leaveAndroidZone(zoneId: string): Promise<MobileAppState> 
   return updated;
 }
 
-export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
+export async function runAndroidSyncNow(
+  reason = 'MANUAL',
+  onProgress?: (progress: SyncProgress | null) => void,
+): Promise<{
   summary: SyncRunSummary;
   document: ListFileDocument;
 }> {
-  const initialState = await loadMobileConfig();
-  if (!initialState.syncDirectoryUri) {
-    throw new Error('Chưa chọn thư mục đồng bộ trên điện thoại.');
-  }
-  const syncDirectoryUri = initialState.syncDirectoryUri;
-  const activeZoneId = initialState.activeZoneId || DEFAULT_ZONE_ID;
-  const { token, updatedState: state } = await getValidMobileAccessToken(initialState);
-
-  const rootFolderId = await ensureDriveWorkspace(state);
-  const activeZoneObj = (state.zones ?? []).find((z) => z.zoneId === activeZoneId);
-  const targetZoneFolderId = await ensureZoneDriveFolder(
-    token,
-    rootFolderId,
-    activeZoneId,
-    activeZoneObj?.zoneName || DEFAULT_ZONE_NAME,
-  );
-  const { doc: localDoc, uriMap } = await scanAndroidLocalFolder(
-    syncDirectoryUri,
-    state.deviceName,
-  );
-
-  // Locate list-file.md on Google Drive for the active zone
-  let listFileId =
-    activeZoneId === DEFAULT_ZONE_ID
-      ? state.googleAuth.listFileDriveId
-      : (activeZoneObj?.listFileDriveId ?? null);
-  if (!listFileId) {
-    const q = `name = '${LIST_FILE_NAME}' and '${targetZoneFolderId}' in parents and trashed = false`;
-    const searchRes = await fetch(
-      `${DRIVE_FILES_API}?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
-    const searchData = (await searchRes.json()) as { files?: Array<{ id: string }> };
-    listFileId = searchData.files?.[0]?.id ?? null;
-  }
-
-  let remoteDoc: ListFileDocument = {
-    lastUpdatedAt: new Date(0).toISOString(),
-    updatedByDevice: 'None',
-    revision: 0,
-    entries: [],
+  const report = (progress: SyncProgress | null) => {
+    onProgress?.(progress);
   };
 
-  if (listFileId) {
-    const res = await fetch(`${DRIVE_FILES_API}/${listFileId}?alt=media`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.ok) {
-      remoteDoc = parseListFile(await res.text());
+  try {
+    report(makeProgress('PREPARING', 0, 0, null, 'Đang chuẩn bị đồng bộ...'));
+    const initialState = await loadMobileConfig();
+    if (!initialState.syncDirectoryUri) {
+      throw new Error('Chưa chọn thư mục đồng bộ trên điện thoại.');
     }
-  }
+    const syncDirectoryUri = initialState.syncDirectoryUri;
+    const activeZoneId = initialState.activeZoneId || DEFAULT_ZONE_ID;
+    const { token, updatedState: state } = await getValidMobileAccessToken(initialState);
 
-  const knownDevicesSet = new Set<string>(remoteDoc.knownDevices ?? []);
-  if (
-    remoteDoc.updatedByDevice &&
-    remoteDoc.updatedByDevice !== 'None' &&
-    remoteDoc.updatedByDevice !== 'Unknown'
-  ) {
-    knownDevicesSet.add(remoteDoc.updatedByDevice);
-  }
-  const newDeviceJoined = !knownDevicesSet.has(state.deviceName);
-  knownDevicesSet.add(state.deviceName);
-  const knownDevices = [...knownDevicesSet].sort((a, b) => a.localeCompare(b));
+    const rootFolderId = await ensureDriveWorkspace(state);
+    const activeZoneObj = (state.zones ?? []).find((z) => z.zoneId === activeZoneId);
+    const targetZoneFolderId = await ensureZoneDriveFolder(
+      token,
+      rootFolderId,
+      activeZoneId,
+      activeZoneObj?.zoneName || DEFAULT_ZONE_NAME,
+    );
 
-  const localActiveMap = new Map<string, FileIndexEntry>();
-  for (const e of localDoc.entries) {
-    if (e.status === 'ACTIVE') localActiveMap.set(e.relativePath, e);
-  }
+    report(makeProgress('SCANNING', 0, 0, null, 'Đang quét thư mục trên điện thoại...'));
+    const { doc: localDoc, uriMap } = await scanAndroidLocalFolder(
+      syncDirectoryUri,
+      state.deviceName,
+    );
 
-  const zoneBaseline = state.zoneBaselines?.[activeZoneId] ?? state.baselineHashes;
-  const diff = diffListFiles(localDoc.entries, remoteDoc, zoneBaseline);
-  const finalMap = new Map<string, FileIndexEntry>();
-  for (const e of remoteDoc.entries) {
-    const localMatch = localActiveMap.get(e.relativePath);
-    if (e.status === 'ACTIVE' && localMatch && localMatch.sha256 === e.sha256) {
-      finalMap.set(e.relativePath, {
-        ...e,
-        syncedDevices: Array.from(
-          new Set([...(e.syncedDevices ?? [e.updatedBy]), state.deviceName]),
-        ),
-      });
-    } else if (e.status === 'DELETED' && !localMatch) {
-      finalMap.set(e.relativePath, {
-        ...e,
-        syncedDevices: Array.from(
-          new Set([...(e.syncedDevices ?? [e.updatedBy]), state.deviceName]),
-        ),
-      });
-    } else {
-      finalMap.set(e.relativePath, e);
+    report(makeProgress('PREPARING', 0, 0, null, 'Đang đọc chỉ mục từ Google Drive...'));
+    // Locate list-file.md on Google Drive for the active zone
+    let listFileId =
+      activeZoneId === DEFAULT_ZONE_ID
+        ? state.googleAuth.listFileDriveId
+        : (activeZoneObj?.listFileDriveId ?? null);
+    if (!listFileId) {
+      const q = `name = '${LIST_FILE_NAME}' and '${targetZoneFolderId}' in parents and trashed = false`;
+      const searchRes = await fetch(
+        `${DRIVE_FILES_API}?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      const searchData = (await searchRes.json()) as { files?: Array<{ id: string }> };
+      listFileId = searchData.files?.[0]?.id ?? null;
     }
-  }
 
-  let uploadedCount = 0;
-  let downloadedCount = 0;
-  let deletedLocallyCount = 0;
-  let markedDeletedRemotelyCount = 0;
-  let conflictsCount = 0;
-  let requestedReuploadCount = 0;
-  let relayPurgedCount = 0;
+    let remoteDoc: ListFileDocument = {
+      lastUpdatedAt: new Date(0).toISOString(),
+      updatedByDevice: 'None',
+      revision: 0,
+      entries: [],
+    };
 
-  // Download missing/updated files to Android folder (or request re-upload if relay already purged)
-  for (const rem of diff.toDownload) {
-    if (!rem.driveFileId || rem.driveFileId === '-') {
+    if (listFileId) {
+      const res = await fetch(`${DRIVE_FILES_API}/${listFileId}?alt=media`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        remoteDoc = parseListFile(await res.text());
+      }
+    }
+
+    const knownDevicesSet = new Set<string>(remoteDoc.knownDevices ?? []);
+    if (
+      remoteDoc.updatedByDevice &&
+      remoteDoc.updatedByDevice !== 'None' &&
+      remoteDoc.updatedByDevice !== 'Unknown'
+    ) {
+      knownDevicesSet.add(remoteDoc.updatedByDevice);
+    }
+    const newDeviceJoined = !knownDevicesSet.has(state.deviceName);
+    knownDevicesSet.add(state.deviceName);
+    const knownDevices = [...knownDevicesSet].sort((a, b) => a.localeCompare(b));
+
+    const localActiveMap = new Map<string, FileIndexEntry>();
+    for (const e of localDoc.entries) {
+      if (e.status === 'ACTIVE') localActiveMap.set(e.relativePath, e);
+    }
+
+    const zoneBaseline = state.zoneBaselines?.[activeZoneId] ?? state.baselineHashes;
+    const diff = diffListFiles(localDoc.entries, remoteDoc, zoneBaseline);
+    report(makeProgress('PREPARING', 0, 0, null, 'Đang tính toán thay đổi cần đồng bộ...'));
+    const finalMap = new Map<string, FileIndexEntry>();
+    for (const e of remoteDoc.entries) {
+      const localMatch = localActiveMap.get(e.relativePath);
+      if (e.status === 'ACTIVE' && localMatch && localMatch.sha256 === e.sha256) {
+        finalMap.set(e.relativePath, {
+          ...e,
+          syncedDevices: Array.from(
+            new Set([...(e.syncedDevices ?? [e.updatedBy]), state.deviceName]),
+          ),
+        });
+      } else if (e.status === 'DELETED' && !localMatch) {
+        finalMap.set(e.relativePath, {
+          ...e,
+          syncedDevices: Array.from(
+            new Set([...(e.syncedDevices ?? [e.updatedBy]), state.deviceName]),
+          ),
+        });
+      } else {
+        finalMap.set(e.relativePath, e);
+      }
+    }
+
+    let uploadedCount = 0;
+    let downloadedCount = 0;
+    let deletedLocallyCount = 0;
+    let markedDeletedRemotelyCount = 0;
+    let conflictsCount = 0;
+    let requestedReuploadCount = 0;
+    let relayPurgedCount = 0;
+
+    // Download missing/updated files to Android folder (or request re-upload if relay already purged)
+    let downloadDone = 0;
+    const downloadTotal = diff.toDownload.length;
+    await runWithConcurrency(diff.toDownload, TRANSFER_CONCURRENCY, async (rem) => {
+      if (!rem.driveFileId || rem.driveFileId === '-') {
+        finalMap.set(rem.relativePath, {
+          ...rem,
+          syncedDevices: (rem.syncedDevices ?? [rem.updatedBy]).filter((d) => d !== state.deviceName),
+          requestUpload: true,
+        });
+        requestedReuploadCount += 1;
+        downloadDone += 1;
+        report(
+          makeProgress(
+            'DOWNLOADING',
+            downloadDone,
+            downloadTotal,
+            rem.relativePath,
+            `Đang xử lý tải về (${downloadDone}/${downloadTotal})`,
+          ),
+        );
+        return;
+      }
+
+      const b64 = await downloadUrlAsBase64(
+        `${DRIVE_FILES_API}/${rem.driveFileId}?alt=media`,
+        { Authorization: `Bearer ${token}` },
+      );
+      await writePlatformFile(syncDirectoryUri, uriMap, rem.relativePath, b64, true);
       finalMap.set(rem.relativePath, {
         ...rem,
-        syncedDevices: (rem.syncedDevices ?? [rem.updatedBy]).filter((d) => d !== state.deviceName),
-        requestUpload: true,
+        syncedDevices: Array.from(
+          new Set([...(rem.syncedDevices ?? [rem.updatedBy]), state.deviceName]),
+        ),
+        requestUpload: false,
       });
-      requestedReuploadCount += 1;
-      continue;
+      downloadedCount += 1;
+      downloadDone += 1;
+      report(
+        makeProgress(
+          'DOWNLOADING',
+          downloadDone,
+          downloadTotal,
+          rem.relativePath,
+          `Đang tải về (${downloadDone}/${downloadTotal})`,
+        ),
+      );
+    });
+
+    // Delete locally when marked DELETED in list-file.md
+    const deleteLocalTotal = diff.toDeleteLocally.length;
+    for (let i = 0; i < diff.toDeleteLocally.length; i++) {
+      const remDel = diff.toDeleteLocally[i];
+      report(
+        makeProgress(
+          'DELETING',
+          i + 1,
+          deleteLocalTotal,
+          remDel.relativePath,
+          `Đang dọn file cục bộ (${i + 1}/${deleteLocalTotal})`,
+        ),
+      );
+      const existingUri = uriMap.get(remDel.relativePath);
+      if (existingUri) {
+        await deletePlatformFile(syncDirectoryUri, existingUri, remDel.relativePath);
+        uriMap.delete(remDel.relativePath);
+      }
+      finalMap.set(remDel.relativePath, {
+        ...remDel,
+        syncedDevices: Array.from(
+          new Set([...(remDel.syncedDevices ?? [remDel.updatedBy]), state.deviceName]),
+        ),
+      });
+      deletedLocallyCount += 1;
     }
 
-    const b64 = await downloadUrlAsBase64(
-      `${DRIVE_FILES_API}/${rem.driveFileId}?alt=media`,
-      { Authorization: `Bearer ${token}` },
-    );
-    await writePlatformFile(syncDirectoryUri, uriMap, rem.relativePath, b64, true);
-    finalMap.set(rem.relativePath, {
-      ...rem,
-      syncedDevices: Array.from(
-        new Set([...(rem.syncedDevices ?? [rem.updatedBy]), state.deviceName]),
-      ),
-      requestUpload: false,
+    // Upload new/edited files from Android to Google Drive
+    let uploadDone = 0;
+    const uploadTotal = diff.toUpload.length;
+    await runWithConcurrency(diff.toUpload, TRANSFER_CONCURRENCY, async (loc) => {
+      const fileUri = uriMap.get(loc.relativePath);
+      if (!fileUri) {
+        uploadDone += 1;
+        report(
+          makeProgress(
+            'UPLOADING',
+            uploadDone,
+            uploadTotal,
+            loc.relativePath,
+            `Đang đẩy lên (${uploadDone}/${uploadTotal})`,
+          ),
+        );
+        return;
+      }
+      const b64 = await readPlatformFileBase64(syncDirectoryUri, fileUri, loc.relativePath);
+      const prevRemote = finalMap.get(loc.relativePath);
+      const driveId = await uploadTextOrBase64ToDrive(
+        token,
+        loc.relativePath.replace(/\//g, '__'),
+        'application/octet-stream',
+        b64,
+        true,
+        targetZoneFolderId,
+        prevRemote?.driveFileId !== '-' ? prevRemote?.driveFileId : undefined,
+      );
+      finalMap.set(loc.relativePath, {
+        ...loc,
+        updatedBy: state.deviceName,
+        driveFileId: driveId,
+        syncedDevices: [state.deviceName],
+        requestUpload: false,
+      });
+      uploadedCount += 1;
+      uploadDone += 1;
+      report(
+        makeProgress(
+          'UPLOADING',
+          uploadDone,
+          uploadTotal,
+          loc.relativePath,
+          `Đang đẩy lên (${uploadDone}/${uploadTotal})`,
+        ),
+      );
     });
-    downloadedCount += 1;
-  }
-
-  // Delete locally when marked DELETED in list-file.md
-  for (const remDel of diff.toDeleteLocally) {
-    const existingUri = uriMap.get(remDel.relativePath);
-    if (existingUri) {
-      await deletePlatformFile(syncDirectoryUri, existingUri, remDel.relativePath);
-      uriMap.delete(remDel.relativePath);
-    }
-    finalMap.set(remDel.relativePath, {
-      ...remDel,
-      syncedDevices: Array.from(
-        new Set([...(remDel.syncedDevices ?? [remDel.updatedBy]), state.deviceName]),
-      ),
-    });
-    deletedLocallyCount += 1;
-  }
-
-  // Upload new/edited files from Android to Google Drive
-  for (const loc of diff.toUpload) {
-    const fileUri = uriMap.get(loc.relativePath);
-    if (!fileUri) continue;
-    const b64 = await readPlatformFileBase64(syncDirectoryUri, fileUri, loc.relativePath);
-    const prevRemote = finalMap.get(loc.relativePath);
-    const driveId = await uploadTextOrBase64ToDrive(
-      token,
-      loc.relativePath.replace(/\//g, '__'),
-      'application/octet-stream',
-      b64,
-      true,
-      targetZoneFolderId,
-      prevRemote?.driveFileId !== '-' ? prevRemote?.driveFileId : undefined,
-    );
-    finalMap.set(loc.relativePath, {
-      ...loc,
-      updatedBy: state.deviceName,
-      driveFileId: driveId,
-      syncedDevices: [state.deviceName],
-      requestUpload: false,
-    });
-    uploadedCount += 1;
-  }
 
   // Fulfill relay re-upload requests if Android holds the file locally
   for (const entry of finalMap.values()) {
@@ -743,146 +863,153 @@ export async function runAndroidSyncNow(reason = 'MANUAL'): Promise<{
     }
   }
 
-  const pushed =
-    uploadedCount > 0 ||
-    markedDeletedRemotelyCount > 0 ||
-    conflictsCount > 0 ||
-    requestedReuploadCount > 0;
-  const shouldWriteRemote =
-    pushed || relayPurgedCount > 0 || newDeviceJoined || (!listFileId && finalMap.size > 0);
-  const nowIso = new Date().toISOString();
-  const nextRev = pushed ? remoteDoc.revision + 1 : remoteDoc.revision;
+    report(makeProgress('FINALIZING', 0, 0, null, 'Đang hoàn tất đồng bộ...'));
+    const pushed =
+      uploadedCount > 0 ||
+      markedDeletedRemotelyCount > 0 ||
+      conflictsCount > 0 ||
+      requestedReuploadCount > 0;
+    const shouldWriteRemote =
+      pushed || relayPurgedCount > 0 || newDeviceJoined || (!listFileId && finalMap.size > 0);
+    const nowIso = new Date().toISOString();
+    const nextRev = pushed ? remoteDoc.revision + 1 : remoteDoc.revision;
 
-  const finalDoc: ListFileDocument = {
-    lastUpdatedAt: pushed || relayPurgedCount > 0 ? nowIso : remoteDoc.lastUpdatedAt,
-    updatedByDevice: pushed ? state.deviceName : remoteDoc.updatedByDevice,
-    revision: nextRev,
-    knownDevices,
-    entries: [...finalMap.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
-  };
-
-  const serializedMd = serializeListFile(finalDoc);
-
-  if (shouldWriteRemote) {
-    listFileId = await uploadTextOrBase64ToDrive(
-      token,
-      LIST_FILE_NAME,
-      'text/markdown',
-      serializedMd,
-      false,
-      targetZoneFolderId,
-      listFileId ?? undefined,
-    );
-  }
-
-  const hasOutbound =
-    uploadedCount > 0 || markedDeletedRemotelyCount > 0 || conflictsCount > 0;
-  const hasInbound = downloadedCount > 0 || deletedLocallyCount > 0;
-
-  if (
-    (hasOutbound || hasInbound) &&
-    state.telegramBot.enabled &&
-    state.telegramBot.botToken &&
-    state.telegramBot.chatId
-  ) {
-    const zoneLabel = activeZoneObj?.zoneName || activeZoneId;
-    const lines: string[] = [
-      hasOutbound
-        ? `🔄 [FolderSync Rev #${nextRev} | By: ${state.deviceName}]`
-        : `📥 [FolderSync Synced #${nextRev} | On: ${state.deviceName}]`,
-      `🌐 Vùng đồng bộ: ${zoneLabel}`,
-    ];
-    if (uploadedCount > 0) {
-      lines.push(`✅ Đã đẩy lên: ${uploadedCount} file`);
-    }
-    if (downloadedCount > 0) {
-      lines.push(`📥 Đã tải về điện thoại: ${downloadedCount} file`);
-    }
-    if (markedDeletedRemotelyCount > 0) {
-      lines.push(`🗑️ Đã xóa: ${markedDeletedRemotelyCount} file`);
-    }
-    if (deletedLocallyCount > 0) {
-      lines.push(`🧹 Đã dọn file bị xóa từ xa: ${deletedLocallyCount} file`);
-    }
-    if (conflictsCount > 0) {
-      lines.push(`⚠️ Xung đột (đã tách bản sao): ${conflictsCount} file`);
-    }
-    if (hasOutbound) {
-      lines.push(`📱 Các thiết bị khác có thể kiểm tra list-file.md để đồng bộ ngay!`);
-    }
-
-    try {
-      const teleRes = await fetch(
-        `https://api.telegram.org/bot${state.telegramBot.botToken}/sendMessage`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: state.telegramBot.chatId,
-            text: lines.join('\n'),
-          }),
-        },
-      );
-      if (!teleRes.ok) {
-        console.warn('[FolderSync][Telegram] Gửi thông báo thất bại:', await teleRes.text());
-      }
-    } catch (teleErr) {
-      console.warn('[FolderSync][Telegram] Lỗi kết nối Telegram:', teleErr);
-    }
-  }
-
-  await writePlatformFile(syncDirectoryUri, uriMap, LIST_FILE_NAME, serializedMd, false);
-
-  const nextBaseline: Record<string, string> = {};
-  for (const e of finalDoc.entries) {
-    const hasFileLocally = !e.syncedDevices || e.syncedDevices.includes(state.deviceName);
-    if (e.status === 'ACTIVE' && e.sha256 !== '-' && hasFileLocally) {
-      nextBaseline[e.relativePath] = e.sha256;
-    }
-  }
-
-  const updatedZones = (state.zones ?? []).map((z) =>
-    z.zoneId === activeZoneId
-      ? {
-          ...z,
-          driveFolderId: targetZoneFolderId,
-          listFileDriveId: listFileId,
-          lastSyncedRevision: nextRev,
-          lastSyncedAt: nowIso,
-          memberDevices: knownDevices,
-        }
-      : z,
-  );
-
-  await saveMobileConfig({
-    ...state,
-    lastSyncedRevision: nextRev,
-    lastSyncedAt: nowIso,
-    baselineHashes: nextBaseline,
-    zoneBaselines: {
-      ...(state.zoneBaselines ?? {}),
-      [activeZoneId]: nextBaseline,
-    },
-    zones: updatedZones,
-    googleAuth: {
-      ...state.googleAuth,
-      driveRootFolderId: rootFolderId,
-      listFileDriveId:
-        activeZoneId === DEFAULT_ZONE_ID ? listFileId : state.googleAuth.listFileDriveId,
-    },
-  });
-
-  return {
-    summary: {
-      reason,
-      uploadedCount,
-      downloadedCount,
-      deletedLocallyCount,
-      markedDeletedRemotelyCount,
-      conflictsCount,
+    const finalDoc: ListFileDocument = {
+      lastUpdatedAt: pushed || relayPurgedCount > 0 ? nowIso : remoteDoc.lastUpdatedAt,
+      updatedByDevice: pushed ? state.deviceName : remoteDoc.updatedByDevice,
       revision: nextRev,
-      completedAt: nowIso,
-    },
-    document: finalDoc,
-  };
+      knownDevices,
+      entries: [...finalMap.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+    };
+
+    const serializedMd = serializeListFile(finalDoc);
+
+    if (shouldWriteRemote) {
+      listFileId = await uploadTextOrBase64ToDrive(
+        token,
+        LIST_FILE_NAME,
+        'text/markdown',
+        serializedMd,
+        false,
+        targetZoneFolderId,
+        listFileId ?? undefined,
+      );
+    }
+
+    const hasOutbound =
+      uploadedCount > 0 || markedDeletedRemotelyCount > 0 || conflictsCount > 0;
+    const hasInbound = downloadedCount > 0 || deletedLocallyCount > 0;
+
+    if (
+      (hasOutbound || hasInbound) &&
+      state.telegramBot.enabled &&
+      state.telegramBot.botToken &&
+      state.telegramBot.chatId
+    ) {
+      const zoneLabel = activeZoneObj?.zoneName || activeZoneId;
+      const lines: string[] = [
+        hasOutbound
+          ? `🔄 [FolderSync Rev #${nextRev} | By: ${state.deviceName}]`
+          : `📥 [FolderSync Synced #${nextRev} | On: ${state.deviceName}]`,
+        `🌐 Vùng đồng bộ: ${zoneLabel}`,
+      ];
+      if (uploadedCount > 0) {
+        lines.push(`✅ Đã đẩy lên: ${uploadedCount} file`);
+      }
+      if (downloadedCount > 0) {
+        lines.push(`📥 Đã tải về điện thoại: ${downloadedCount} file`);
+      }
+      if (markedDeletedRemotelyCount > 0) {
+        lines.push(`🗑️ Đã xóa: ${markedDeletedRemotelyCount} file`);
+      }
+      if (deletedLocallyCount > 0) {
+        lines.push(`🧹 Đã dọn file bị xóa từ xa: ${deletedLocallyCount} file`);
+      }
+      if (conflictsCount > 0) {
+        lines.push(`⚠️ Xung đột (đã tách bản sao): ${conflictsCount} file`);
+      }
+      if (hasOutbound) {
+        lines.push(`📱 Các thiết bị khác có thể kiểm tra list-file.md để đồng bộ ngay!`);
+      }
+
+      try {
+        const teleRes = await fetch(
+          `https://api.telegram.org/bot${state.telegramBot.botToken}/sendMessage`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: state.telegramBot.chatId,
+              text: lines.join('\n'),
+            }),
+          },
+        );
+        if (!teleRes.ok) {
+          console.warn('[FolderSync][Telegram] Gửi thông báo thất bại:', await teleRes.text());
+        }
+      } catch (teleErr) {
+        console.warn('[FolderSync][Telegram] Lỗi kết nối Telegram:', teleErr);
+      }
+    }
+
+    await writePlatformFile(syncDirectoryUri, uriMap, LIST_FILE_NAME, serializedMd, false);
+
+    const nextBaseline: Record<string, string> = {};
+    for (const e of finalDoc.entries) {
+      const hasFileLocally = !e.syncedDevices || e.syncedDevices.includes(state.deviceName);
+      if (e.status === 'ACTIVE' && e.sha256 !== '-' && hasFileLocally) {
+        nextBaseline[e.relativePath] = e.sha256;
+      }
+    }
+
+    const latest = await loadMobileConfig();
+    const updatedZones = (latest.zones ?? []).map((z) =>
+      z.zoneId === activeZoneId
+        ? {
+            ...z,
+            driveFolderId: targetZoneFolderId,
+            listFileDriveId: listFileId,
+            lastSyncedRevision: nextRev,
+            lastSyncedAt: nowIso,
+            memberDevices: knownDevices,
+          }
+        : z,
+    );
+
+    const isStillActiveZone = latest.activeZoneId === activeZoneId;
+
+    await saveMobileConfig({
+      ...latest,
+      lastSyncedRevision: isStillActiveZone ? nextRev : latest.lastSyncedRevision,
+      lastSyncedAt: isStillActiveZone ? nowIso : latest.lastSyncedAt,
+      baselineHashes: isStillActiveZone ? nextBaseline : latest.baselineHashes,
+      zoneBaselines: {
+        ...(latest.zoneBaselines ?? {}),
+        [activeZoneId]: nextBaseline,
+      },
+      zones: updatedZones,
+      googleAuth: {
+        ...latest.googleAuth,
+        driveRootFolderId: rootFolderId,
+        listFileDriveId:
+          activeZoneId === DEFAULT_ZONE_ID ? listFileId : latest.googleAuth.listFileDriveId,
+      },
+    });
+
+    return {
+      summary: {
+        reason,
+        uploadedCount,
+        downloadedCount,
+        deletedLocallyCount,
+        markedDeletedRemotelyCount,
+        conflictsCount,
+        revision: nextRev,
+        completedAt: nowIso,
+      },
+      document: finalDoc,
+    };
+  } finally {
+    report(null);
+  }
 }

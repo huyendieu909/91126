@@ -163,13 +163,20 @@ export const TouchableOpacity: React.FC<{
   style?: AnyStyle;
   disabled?: boolean;
   onPress?: () => void;
+  onLongPress?: () => void;
   children?: React.ReactNode;
-}> = ({ style, disabled, onPress, children }) => (
+}> = ({ style, disabled, onPress, onLongPress, children }) => (
   <button
     type="button"
     disabled={disabled}
     onClick={() => {
       if (!disabled && onPress) onPress();
+    }}
+    onContextMenu={(e) => {
+      if (!disabled && onLongPress) {
+        e.preventDefault();
+        onLongPress();
+      }
     }}
     style={{
       display: 'flex',
@@ -195,6 +202,9 @@ export const TextInput: React.FC<{
   placeholder?: string;
   placeholderTextColor?: string;
   secureTextEntry?: boolean;
+  multiline?: boolean;
+  numberOfLines?: number;
+  textAlignVertical?: 'auto' | 'top' | 'bottom' | 'center';
 }> = ({
   style,
   value,
@@ -202,18 +212,56 @@ export const TextInput: React.FC<{
   onBlur,
   placeholder,
   secureTextEntry,
-}) => (
-  <input
-    type={secureTextEntry ? 'password' : 'text'}
-    value={value ?? ''}
-    onChange={(e) => onChangeText?.(e.target.value)}
-    onBlur={onBlur}
-    placeholder={placeholder}
+  multiline,
+  numberOfLines,
+}) => {
+  const sharedStyle: React.CSSProperties = {
+    width: '100%',
+    boxSizing: 'border-box',
+    outline: 'none',
+    fontFamily: 'inherit',
+    ...flattenStyle(style),
+  };
+
+  if (multiline) {
+    return (
+      <textarea
+        value={value ?? ''}
+        rows={numberOfLines ?? 6}
+        onChange={(e) => onChangeText?.(e.target.value)}
+        onBlur={onBlur}
+        placeholder={placeholder}
+        style={{
+          ...sharedStyle,
+          resize: 'vertical',
+        }}
+      />
+    );
+  }
+
+  return (
+    <input
+      type={secureTextEntry ? 'password' : 'text'}
+      value={value ?? ''}
+      onChange={(e) => onChangeText?.(e.target.value)}
+      onBlur={onBlur}
+      placeholder={placeholder}
+      style={sharedStyle}
+    />
+  );
+};
+
+export const Image: React.FC<{
+  source: { uri: string } | number;
+  style?: AnyStyle;
+  resizeMode?: 'contain' | 'cover' | 'stretch' | 'center';
+}> = ({ source, style, resizeMode = 'contain' }) => (
+  <img
+    src={typeof source === 'number' ? '' : source.uri}
+    alt=""
     style={{
-      width: '100%',
-      boxSizing: 'border-box',
-      outline: 'none',
-      fontFamily: 'inherit',
+      objectFit: resizeMode === 'stretch' ? 'fill' : resizeMode === 'center' ? 'none' : resizeMode,
+      maxWidth: '100%',
       ...flattenStyle(style),
     }}
   />
@@ -239,11 +287,14 @@ export const Switch: React.FC<{
 export const ScrollView: React.FC<{
   style?: AnyStyle;
   contentContainerStyle?: AnyStyle;
+  horizontal?: boolean;
+  showsHorizontalScrollIndicator?: boolean;
   children?: React.ReactNode;
-}> = ({ style, contentContainerStyle, children }) => (
+}> = ({ style, contentContainerStyle, horizontal, children }) => (
   <div
     style={{
-      overflowY: 'auto',
+      overflowY: horizontal ? 'hidden' : 'auto',
+      overflowX: horizontal ? 'auto' : 'hidden',
       maxHeight: '100%',
       boxSizing: 'border-box',
       ...flattenStyle(style),
@@ -252,7 +303,7 @@ export const ScrollView: React.FC<{
     <div
       style={{
         display: 'flex',
-        flexDirection: 'column',
+        flexDirection: horizontal ? 'row' : 'column',
         boxSizing: 'border-box',
         ...flattenStyle(contentContainerStyle),
       }}
@@ -272,6 +323,8 @@ export function FlatList<T>({
   keyExtractor: (item: T, index: number) => string;
   renderItem: (info: { item: T; index: number }) => React.ReactNode;
   ListEmptyComponent?: React.ReactNode;
+  refreshing?: boolean;
+  onRefresh?: () => void;
 }) {
   return (
     <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>

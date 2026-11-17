@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { Linking, Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Crypto from 'expo-crypto';
 import { LIST_FILE_NAME } from '@foldersync/shared';
@@ -377,7 +377,33 @@ export async function writePlatformFile(
     return uri;
   }
 
-  const existingUri = uriMap.get(normalizedRelPath);
+  let existingUri = uriMap.get(normalizedRelPath);
+  if (!existingUri) {
+    // Try to resolve parent path and find an existing child with the same name
+    // to avoid creating duplicate files (e.g. "file (1).jpg") on SAF providers.
+    try {
+      let parentUri = directoryUri;
+      const parts = normalizedRelPath.split('/').filter(Boolean);
+      const fileName = parts.pop() || normalizedRelPath;
+      if (normalizedRelPath !== LIST_FILE_NAME) {
+        for (const dirName of parts) {
+          parentUri = await ensureNativeSafSubdirectory(parentUri, dirName);
+        }
+      }
+      const safKey = normalizedRelPath === LIST_FILE_NAME ? LIST_FILE_NAME : fileName;
+      const children = await StorageAccessFramework.readDirectoryAsync(parentUri);
+      for (const childUri of children) {
+        if (extractFileNameFromSafUri(childUri) === safKey) {
+          existingUri = childUri;
+          uriMap.set(normalizedRelPath, childUri);
+          break;
+        }
+      }
+    } catch {
+      // Fall through to create path below.
+    }
+  }
+
   if (existingUri) {
     await FileSystem.writeAsStringAsync(existingUri, content, {
       encoding: isBase64 ? FileSystem.EncodingType.Base64 : FileSystem.EncodingType.UTF8,
@@ -474,5 +500,107 @@ export async function downloadUrlAsBase64(
     });
   } finally {
     await FileSystem.deleteAsync(dlRes.uri, { idempotent: true });
+  }
+}
+
+export function getMimeTypeFromFileName(relativePath: string): string {
+  const ext = relativePath.split('.').pop()?.toLowerCase() ?? '';
+  switch (ext) {
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'png':
+      return 'image/png';
+    case 'webp':
+      return 'image/webp';
+    case 'gif':
+      return 'image/gif';
+    case 'svg':
+      return 'image/svg+xml';
+    case 'mp4':
+    case 'm4v':
+      return 'video/mp4';
+    case 'mkv':
+      return 'video/x-matroska';
+    case 'webm':
+      return 'video/webm';
+    case 'mp3':
+      return 'audio/mpeg';
+    case 'wav':
+      return 'audio/wav';
+    case 'pdf':
+      return 'application/pdf';
+    case 'md':
+      return 'text/markdown';
+    case 'json':
+      return 'application/json';
+    case 'txt':
+    case 'log':
+    case 'csv':
+      return 'text/plain';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+export async function readPlatformFileText(
+  directoryUri: string,
+  fileUri: string,
+  relativePath: string,
+): Promise<string> {
+  if (!isWebSimulator() && fileUri) {
+    return FileSystem.readAsStringAsync(fileUri, {
+      encoding: FileSystem.EncodingType.UTF8,
+    });
+  }
+  const b64 = await readPlatformFileBase64(directoryUri, fileUri, relativePath);
+  const bytes = base64ToUint8Array(b64);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+export async function renamePlatformFile(
+  directoryUri: string,
+  uriMap: Map<string, string>,
+  oldRelPath: string,
+  newRelPath: string,
+): Promise<string> {
+  const oldUri = uriMap.get(oldRelPath) ?? '';
+  const b64 = await readPlatformFileBase64(directoryUri, oldUri, oldRelPath);
+  const newUri = await writePlatformFile(directoryUri, uriMap, newRelPath, b64, true);
+  await deletePlatformFile(directoryUri, oldUri || undefined, oldRelPath);
+  uriMap.delete(oldRelPath);
+  return newUri;
+}
+
+export async function openPlatformFileExternal(
+  directoryUri: string,
+  fileUri: string | undefined,
+  relativePath: string,
+): Promise<void> {
+  const mimeType = getMimeTypeFromFileName(relativePath);
+  if (isWebSimulator()) {
+    const b64 = await readPlatformFileBase64(directoryUri, fileUri ?? '', relativePath);
+    const bytes = base64ToUint8Array(b64);
+    const blob = new Blob([bytes], { type: mimeType });
+    const blobUrl = URL.createObjectURL(blob);
+    window.open(blobUrl, '_blank', 'noopener,noreferrer');
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    return;
+  }
+
+  if (!fileUri) {
+    throw new Error('Không tìm thấy URI của file trên thiết bị.');
+  }
+
+  try {
+    await Linking.openURL(fileUri);
+    return;
+  } catch {
+    // Fallback: copy to app cache and generate FileProvider content URI
+    const safeName = relativePath.split('/').pop() || 'file';
+    const localCacheUri = `${FileSystem.cacheDirectory ?? ''}open_${Date.now()}_${safeName}`;
+    await FileSystem.copyAsync({ from: fileUri, to: localCacheUri });
+    const contentUri = await FileSystem.getContentUriAsync(localCacheUri);
+    await Linking.openURL(contentUri);
   }
 }
