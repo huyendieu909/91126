@@ -623,4 +623,42 @@ describe('Phase 4: Multi-Device SyncCoordinator (list-file.md + Cloud + Telegram
       await errNode.folderWatcher.stop();
     }
   });
+
+  it('writes syncedDevices ACK back to remote list-file.md after download in a 3-device group so pollRemoteChangesOnce does not loop', async () => {
+    const noOpFetch: typeof fetch = async () =>
+      new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+    const nodeC = await createNode('Android-Phone', 'node-c-ack', noOpFetch);
+
+    try {
+      // Register all 3 devices on remote list-file.md
+      await fs.writeFile(path.join(nodeA.syncDir, 'seed.txt'), 'seed', 'utf-8');
+      await nodeA.coordinator.syncNow('SEED_A');
+      await nodeB.coordinator.syncNow('SEED_B');
+      await nodeC.coordinator.syncNow('SEED_C');
+
+      // Node C uploads a new file while Node B stays offline
+      await fs.writeFile(path.join(nodeC.syncDir, 'from-phone.txt'), 'Hello from C', 'utf-8');
+      await nodeC.coordinator.syncNow('C_UPLOAD');
+
+      // Node A polls background changes -> downloads from-phone.txt AND persists Linux-PC ACK to remote
+      const firstPoll = await nodeA.coordinator.pollRemoteChangesOnce();
+      expect(firstPoll).toBe(true);
+      expect(await fs.readFile(path.join(nodeA.syncDir, 'from-phone.txt'), 'utf-8')).toBe(
+        'Hello from C',
+      );
+
+      const remoteDocAfterAck = await sharedCloud.readRemoteListFile();
+      const row = remoteDocAfterAck?.entries.find((e) => e.relativePath === 'from-phone.txt');
+      expect(row?.syncedDevices).toContain('Linux-PC');
+      expect(row?.syncedDevices).toContain('Android-Phone');
+
+      // Second poll on Node A must be idle (false) rather than flashing sync every 15s!
+      const secondPoll = await nodeA.coordinator.pollRemoteChangesOnce();
+      expect(secondPoll).toBe(false);
+    } finally {
+      nodeC.telegramService.stop();
+      nodeC.coordinator.dispose();
+      await nodeC.folderWatcher.stop();
+    }
+  });
 });

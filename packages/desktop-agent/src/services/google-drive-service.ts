@@ -381,15 +381,28 @@ export class GoogleDriveProvider implements CloudStorageProvider {
     const data = (await res.json()) as { files?: Array<{ id: string }> };
     if (data.files && data.files.length > 0) {
       const id = data.files[0].id;
-      if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
-        await this.configService.saveConfig({
-          googleAuth: { listFileDriveId: id },
-        });
-      }
+      await this.persistZoneListFileId(zoneId, id);
       return id;
     }
 
     return null;
+  }
+
+  private async persistZoneListFileId(zoneId: string, fileId: string | null): Promise<void> {
+    if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
+      await this.configService.saveConfig({
+        googleAuth: { listFileDriveId: fileId },
+      });
+      return;
+    }
+    const cfg = await this.configService.loadConfig();
+    if (Array.isArray(cfg.zones) && cfg.zones.some((z) => z.zoneId === zoneId)) {
+      await this.configService.saveConfig({
+        zones: cfg.zones.map((z) =>
+          z.zoneId === zoneId ? { ...z, listFileDriveId: fileId } : z,
+        ),
+      });
+    }
   }
 
   public async readRemoteListFile(zoneId = DEFAULT_ZONE_ID): Promise<ListFileDocument | null> {
@@ -406,9 +419,7 @@ export class GoogleDriveProvider implements CloudStorageProvider {
     });
 
     if (res.status === 404) {
-      if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
-        await this.configService.saveConfig({ googleAuth: { listFileDriveId: null } });
-      }
+      await this.persistZoneListFileId(zoneId, null);
       return null;
     }
 
@@ -438,11 +449,7 @@ export class GoogleDriveProvider implements CloudStorageProvider {
       existingId ?? undefined,
     );
 
-    if (!zoneId || zoneId === DEFAULT_ZONE_ID) {
-      await this.configService.saveConfig({
-        googleAuth: { listFileDriveId: fileId },
-      });
-    }
+    await this.persistZoneListFileId(zoneId, fileId);
 
     return fileId;
   }
