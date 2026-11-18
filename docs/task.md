@@ -123,3 +123,17 @@
 - [x] **Task 20.1**: Bổ sung `renamePlatformFile`, `openPlatformFileExternal` và hỗ trợ đọc/mở file trên `platform-fs.ts` + `rn-web-shim.tsx` (`Image` component)
 - [x] **Task 20.2**: Nâng cấp `App.tsx` với In-App File Viewer (xem ảnh, đọc & sửa/lưu file text/markdown), menu thao tác `⋮` / giữ lâu (Mở / Đổi tên / Xóa), nút `+ Tạo file` mới và chế độ duyệt thư mục con (Breadcrumb)
 - [x] **Task 20.3**: Kiểm chứng `tsc --noEmit` cho `@foldersync/mobile-app` và kiểm tra toàn bộ workspace build/test
+
+## Giai đoạn 21: Vá Triệt Để Lỗi Nháy ACK `syncedDevices` Trên PC & Mobile
+- [x] **Task 21.1**: Cập nhật `shouldWriteRemote` trong `SyncCoordinator.performSyncCycle` (`sync-coordinator.ts`) và `runAndroidSyncNow` (`android-sync-engine.ts`) để luôn ghi ACK `syncedDevices` lên Drive khi có thiết bị vừa nhận/xóa xong (hoặc bản local đã có sẵn nhưng `SyncedDevices` trên Drive còn thiếu), đồng thời lưu `listFileDriveId` theo từng vùng
+- [x] **Task 21.2**: Viết Integration Test mới trong `sync-coordinator.test.ts` mô phỏng vùng 3 thiết bị (2 máy đồng bộ trước, máy thứ 3 offline) kiểm chứng không còn lặp `pollRemoteChangesOnce` nháy mỗi 15s + build/test & restart daemon `:8384`
+
+## Giai đoạn 22: Sửa Mở Video Android (`Media not found.`) & Nút Tải Lên Kiểu Messenger
+- [x] **Task 22.1**: Cài `expo-intent-launcher` (`~58.0.3`), `expo-image-picker` (`~58.0.10`), `expo-document-picker` (`~58.0.5`) và bổ sung stub Web Simulator (`expo-stubs.ts` + `vite.mobile.config.ts`)
+- [x] **Task 22.2**: Sửa `writePlatformFile` (dùng đúng MIME type) & `openPlatformFileExternal` (`FileSystem.getContentUriAsync` + `IntentLauncher` với `flags: 1` + MIME) trong `platform-fs.ts` + thêm helper chọn Ảnh / Video / Tài liệu kiểu Messenger
+- [x] **Task 22.3**: Thêm nút `📤 Tải lên` cạnh `+ Tạo file` & bảng chọn kiểu Messenger (Ảnh / Video / Ảnh & Video / Tài liệu) trong `App.tsx`, tự copy vào thư mục sync + khóa `APP_FOREGROUND` + đồng bộ ngay, và kiểm chứng toàn bộ build/test & docs (`system-architecture.md`)
+
+## Giai đoạn 23: Hoàn Thiện Các Điểm Sau Code Review & Chia Commit
+- [x] **Task 23.1**: Đồng bộ `uriMap` sau `runAndroidSyncNow`, dọn sạch cache tạm `foldersync_open/`, thu hồi `blob:` URL trên Simulator, chặn `APP_FOREGROUND` khi mở trình xem ngoài và tự động sync sau khi Tạo / Sửa / Đổi tên / Xóa file trên Mobile
+- [x] **Task 23.2**: Tối ưu `SyncCoordinator.performSyncCycle` chỉ đọc/ghi `zones-registry.json` trên Google Drive khi `memberDevices` hoặc `listFileDriveId` thực sự thay đổi
+- [x] **Task 23.3**: Kiểm chứng `pnpm -r build && pnpm test` + Vite Mobile Simulator, khởi động lại daemon `:8384`, cập nhật docs và chia thành 3 commit chuẩn Conventional Commits
