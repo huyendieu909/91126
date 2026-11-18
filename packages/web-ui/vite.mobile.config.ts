@@ -293,6 +293,18 @@ export default defineConfig({
         replacement: path.resolve(mobileWebRoot, 'expo-stubs.ts'),
       },
       {
+        find: /^expo-intent-launcher$/,
+        replacement: path.resolve(mobileWebRoot, 'expo-stubs.ts'),
+      },
+      {
+        find: /^expo-image-picker$/,
+        replacement: path.resolve(mobileWebRoot, 'expo-stubs.ts'),
+      },
+      {
+        find: /^expo-document-picker$/,
+        replacement: path.resolve(mobileWebRoot, 'expo-stubs.ts'),
+      },
+      {
         find: /^@foldersync\/shared$/,
         replacement: path.resolve(repoRoot, 'packages/shared/src/index.ts'),
       },

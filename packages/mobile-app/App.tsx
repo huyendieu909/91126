@@ -45,10 +45,12 @@ import {
   deletePlatformFile,
   getMimeTypeFromFileName,
   openPlatformFileExternal,
+  pickAndCopyFilesToSyncFolder,
   readPlatformFileBase64,
   readPlatformFileText,
   renamePlatformFile,
   writePlatformFile,
+  type MessengerUploadKind,
 } from './src/storage/platform-fs';
 
 function formatDisplayFolderPath(rawUri: string | null): string {
@@ -149,6 +151,8 @@ export default function App() {
   const [createFileModalVisible, setCreateFileModalVisible] = useState(false);
   const [newFileName, setNewFileName] = useState('');
   const [newFileContent, setNewFileContent] = useState('');
+  const [uploadPickerVisible, setUploadPickerVisible] = useState(false);
+  const [uploadingLocal, setUploadingLocal] = useState(false);
 
   const uriMapRef = useRef<Map<string, string>>(new Map());
   const suppressForegroundSyncRef = useRef(false);
@@ -195,6 +199,7 @@ export default function App() {
           setStatusMessage(`⏳ ${progress.message}`);
         }
       });
+      uriMapRef.current = res.uriMap;
       setDoc(res.document);
       const fresh = await loadMobileConfig();
       setState(fresh);
@@ -354,30 +359,30 @@ export default function App() {
       return;
     }
 
-    try {
-      await openPlatformFileExternal(state.syncDirectoryUri, fileUri, entry.relativePath);
-    } catch (err) {
-      setStatusMessage(
-        `❌ Không mở được file bằng app ngoài: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    await handleOpenExternal(entry);
   };
 
   const handleOpenExternal = async (entry: FileIndexEntry) => {
     if (!state?.syncDirectoryUri) return;
     const fileUri = uriMapRef.current.get(entry.relativePath);
+    suppressForegroundSyncRef.current = true;
     try {
       await openPlatformFileExternal(state.syncDirectoryUri, fileUri, entry.relativePath);
     } catch (err) {
       setStatusMessage(
         `❌ Không mở được bằng app ngoài: ${err instanceof Error ? err.message : String(err)}`,
       );
+    } finally {
+      setTimeout(() => {
+        suppressForegroundSyncRef.current = false;
+      }, 400);
     }
   };
 
   const handleSavePreviewText = async () => {
     if (!state?.syncDirectoryUri || !previewFile || previewFile.kind !== 'TEXT') return;
     setPreviewSaving(true);
+    const hasCloudAuth = Boolean(state.googleAuth.accessToken || state.googleAuth.refreshToken);
     try {
       await writePlatformFile(
         state.syncDirectoryUri,
@@ -388,7 +393,14 @@ export default function App() {
       );
       await reloadLocalState();
       setPreviewFile(null);
-      setStatusMessage(`✅ Đã lưu "${previewFile.entry.relativePath}". Bấm Đồng bộ ngay để đẩy lên PC!`);
+      setStatusMessage(
+        hasCloudAuth
+          ? `✅ Đã lưu "${previewFile.entry.relativePath}", đang tự đồng bộ lên Cloud...`
+          : `✅ Đã lưu "${previewFile.entry.relativePath}". Bấm Đồng bộ ngay để đẩy lên PC!`,
+      );
+      if (hasCloudAuth) {
+        void handleSyncNow('FILE_SAVED');
+      }
     } catch (err) {
       setStatusMessage(
         `❌ Lỗi lưu file: ${err instanceof Error ? err.message : String(err)}`,
@@ -405,6 +417,7 @@ export default function App() {
       setActionFile(null);
       return;
     }
+    const hasCloudAuth = Boolean(state.googleAuth.accessToken || state.googleAuth.refreshToken);
     try {
       await renamePlatformFile(
         state.syncDirectoryUri,
@@ -414,7 +427,14 @@ export default function App() {
       );
       await reloadLocalState();
       setActionFile(null);
-      setStatusMessage(`✅ Đã đổi tên thành "${trimmed}".`);
+      setStatusMessage(
+        hasCloudAuth
+          ? `✅ Đã đổi tên thành "${trimmed}", đang tự đồng bộ lên Cloud...`
+          : `✅ Đã đổi tên thành "${trimmed}".`,
+      );
+      if (hasCloudAuth) {
+        void handleSyncNow('FILE_RENAMED');
+      }
     } catch (err) {
       setStatusMessage(
         `❌ Lỗi đổi tên file: ${err instanceof Error ? err.message : String(err)}`,
@@ -424,14 +444,23 @@ export default function App() {
 
   const handleDeleteActionFile = async () => {
     if (!state?.syncDirectoryUri || !actionFile) return;
+    const hasCloudAuth = Boolean(state.googleAuth.accessToken || state.googleAuth.refreshToken);
+    const deletedName = actionFile.relativePath;
     try {
-      const fileUri = uriMapRef.current.get(actionFile.relativePath);
-      await deletePlatformFile(state.syncDirectoryUri, fileUri, actionFile.relativePath);
-      uriMapRef.current.delete(actionFile.relativePath);
+      const fileUri = uriMapRef.current.get(deletedName);
+      await deletePlatformFile(state.syncDirectoryUri, fileUri, deletedName);
+      uriMapRef.current.delete(deletedName);
       await reloadLocalState();
       setActionFile(null);
       setConfirmDeleteFile(false);
-      setStatusMessage(`🗑️ Đã xóa "${actionFile.relativePath}" khỏi điện thoại.`);
+      setStatusMessage(
+        hasCloudAuth
+          ? `🗑️ Đã xóa "${deletedName}" khỏi điện thoại, đang tự đồng bộ xóa lên Cloud...`
+          : `🗑️ Đã xóa "${deletedName}" khỏi điện thoại.`,
+      );
+      if (hasCloudAuth) {
+        void handleSyncNow('FILE_DELETED');
+      }
     } catch (err) {
       setStatusMessage(
         `❌ Lỗi xóa file: ${err instanceof Error ? err.message : String(err)}`,
@@ -443,6 +472,7 @@ export default function App() {
     if (!state?.syncDirectoryUri) return;
     const rawName = newFileName.trim().replace(/^\/+/, '');
     if (!rawName) return;
+    const hasCloudAuth = Boolean(state.googleAuth.accessToken || state.googleAuth.refreshToken);
     const targetRelPath =
       browseMode === 'FOLDER' && currentSubDir && !rawName.includes('/')
         ? `${currentSubDir}/${rawName}`
@@ -459,11 +489,58 @@ export default function App() {
       setNewFileName('');
       setNewFileContent('');
       setCreateFileModalVisible(false);
-      setStatusMessage(`✅ Đã tạo file "${targetRelPath}".`);
+      setStatusMessage(
+        hasCloudAuth
+          ? `✅ Đã tạo file "${targetRelPath}", đang tự đồng bộ lên Cloud...`
+          : `✅ Đã tạo file "${targetRelPath}".`,
+      );
+      if (hasCloudAuth) {
+        void handleSyncNow('FILE_CREATED');
+      }
     } catch (err) {
       setStatusMessage(
         `❌ Lỗi tạo file mới: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  };
+
+  const handlePickUploadFiles = async (kind: MessengerUploadKind) => {
+    if (!state?.syncDirectoryUri) return;
+    setUploadPickerVisible(false);
+    setUploadingLocal(true);
+    suppressForegroundSyncRef.current = true;
+    let copied: string[] = [];
+    try {
+      setStatusMessage('⏳ Đang chép file từ máy vào thư mục đồng bộ...');
+      copied = await pickAndCopyFilesToSyncFolder({
+        directoryUri: state.syncDirectoryUri,
+        uriMap: uriMapRef.current,
+        targetSubDir: browseMode === 'FOLDER' ? currentSubDir : '',
+        kind,
+      });
+      if (copied.length > 0) {
+        await reloadLocalState();
+        setStatusMessage(`📤 Đã thêm ${copied.length} file, đang tự đồng bộ lên Cloud...`);
+      } else {
+        setStatusMessage('');
+      }
+    } catch (err) {
+      setStatusMessage(
+        `❌ Lỗi chọn file: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setUploadingLocal(false);
+      if (copied.length > 0) {
+        suppressForegroundSyncRef.current = false;
+      } else {
+        setTimeout(() => {
+          suppressForegroundSyncRef.current = false;
+        }, 400);
+      }
+    }
+
+    if (copied.length > 0) {
+      void handleSyncNow('MOBILE_UPLOAD');
     }
   };
 
@@ -740,14 +817,23 @@ export default function App() {
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.miniChipBtn, styles.miniChipPrimary]}
+              style={styles.miniChipBtn}
               onPress={() => {
                 setNewFileName('');
                 setNewFileContent('');
                 setCreateFileModalVisible(true);
               }}
             >
-              <Text style={styles.miniChipPrimaryText}>+ Tạo file</Text>
+              <Text style={styles.miniChipText}>+ Tạo file</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.miniChipBtn, styles.miniChipPrimary]}
+              disabled={uploadingLocal || syncing}
+              onPress={() => setUploadPickerVisible(true)}
+            >
+              <Text style={styles.miniChipPrimaryText}>
+                {uploadingLocal ? '⏳ Đang thêm...' : '📤 Tải lên'}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1455,6 +1541,74 @@ export default function App() {
           </ScrollView>
         </View>
       </Modal>
+
+      {/* Messenger-Style Upload Media & File Picker Sheet */}
+      <Modal visible={uploadPickerVisible} transparent animationType="slide">
+        <View style={styles.sheetBackdrop}>
+          <View style={styles.sheetCard}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>📤 Chọn File Để Đồng Bộ</Text>
+              <TouchableOpacity
+                style={styles.modalCloseBtn}
+                onPress={() => setUploadPickerVisible(false)}
+              >
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={[styles.fileMeta, { marginBottom: 14 }]}>
+              Chọn ảnh, video hoặc tài liệu trên máy — FolderSync sẽ tự chép vào vùng{' '}
+              {activeZoneTitle} và đồng bộ ngay cho các máy khác.
+            </Text>
+
+            <View style={styles.uploadGridRow}>
+              <TouchableOpacity
+                style={[styles.uploadTile, styles.uploadTileImage]}
+                onPress={() => void handlePickUploadFiles('IMAGE')}
+              >
+                <Text style={styles.uploadTileIcon}>🖼️</Text>
+                <Text style={styles.uploadTileTitle}>Chọn Ảnh</Text>
+                <Text style={styles.uploadTileSub}>Thư viện ảnh (chọn nhiều)</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.uploadTile, styles.uploadTileVideo]}
+                onPress={() => void handlePickUploadFiles('VIDEO')}
+              >
+                <Text style={styles.uploadTileIcon}>🎬</Text>
+                <Text style={styles.uploadTileTitle}>Chọn Video</Text>
+                <Text style={styles.uploadTileSub}>Clip MP4 / MOV từ máy</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={[styles.uploadGridRow, { marginTop: 10 }]}>
+              <TouchableOpacity
+                style={[styles.uploadTile, styles.uploadTileMedia]}
+                onPress={() => void handlePickUploadFiles('MEDIA')}
+              >
+                <Text style={styles.uploadTileIcon}>✨</Text>
+                <Text style={styles.uploadTileTitle}>Ảnh & Video</Text>
+                <Text style={styles.uploadTileSub}>Chọn lẫn ảnh và video</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.uploadTile, styles.uploadTileDoc]}
+                onPress={() => void handlePickUploadFiles('DOCUMENT')}
+              >
+                <Text style={styles.uploadTileIcon}>📄</Text>
+                <Text style={styles.uploadTileTitle}>Tài Liệu / File</Text>
+                <Text style={styles.uploadTileSub}>PDF, Word, Zip, APK...</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={[styles.secondaryBtn, { marginTop: 14 }]}
+              onPress={() => setUploadPickerVisible(false)}
+            >
+              <Text style={styles.secondaryBtnText}>Đóng</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1906,13 +2060,15 @@ const styles = StyleSheet.create({
   },
   explorerHeaderRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 8,
-    marginBottom: 6,
+    marginBottom: 8,
   },
   explorerActionsRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     gap: 6,
   },
@@ -2026,5 +2182,60 @@ const styles = StyleSheet.create({
     color: '#fda4af',
     fontWeight: '700',
     fontSize: 13,
+  },
+  sheetBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(2,6,23,0.78)',
+    justifyContent: 'flex-end',
+  },
+  sheetCard: {
+    backgroundColor: '#0f172a',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    padding: 20,
+    paddingBottom: ANDROID_BOTTOM_INSET + 12,
+    borderTopWidth: 1,
+    borderColor: '#1e293b',
+  },
+  uploadGridRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  uploadTile: {
+    flex: 1,
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    alignItems: 'flex-start',
+  },
+  uploadTileImage: {
+    backgroundColor: 'rgba(16,185,129,0.1)',
+    borderColor: 'rgba(16,185,129,0.3)',
+  },
+  uploadTileVideo: {
+    backgroundColor: 'rgba(99,102,241,0.12)',
+    borderColor: 'rgba(99,102,241,0.35)',
+  },
+  uploadTileMedia: {
+    backgroundColor: 'rgba(236,72,153,0.1)',
+    borderColor: 'rgba(236,72,153,0.3)',
+  },
+  uploadTileDoc: {
+    backgroundColor: 'rgba(245,158,11,0.1)',
+    borderColor: 'rgba(245,158,11,0.3)',
+  },
+  uploadTileIcon: {
+    fontSize: 22,
+    marginBottom: 6,
+  },
+  uploadTileTitle: {
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  uploadTileSub: {
+    color: '#94a3b8',
+    fontSize: 11,
+    marginTop: 2,
   },
 });
