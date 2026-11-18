@@ -137,3 +137,8 @@
 - [x] **Task 23.1**: Đồng bộ `uriMap` sau `runAndroidSyncNow`, dọn sạch cache tạm `foldersync_open/`, thu hồi `blob:` URL trên Simulator, chặn `APP_FOREGROUND` khi mở trình xem ngoài và tự động sync sau khi Tạo / Sửa / Đổi tên / Xóa file trên Mobile
 - [x] **Task 23.2**: Tối ưu `SyncCoordinator.performSyncCycle` chỉ đọc/ghi `zones-registry.json` trên Google Drive khi `memberDevices` hoặc `listFileDriveId` thực sự thay đổi
 - [x] **Task 23.3**: Kiểm chứng `pnpm -r build && pnpm test` + Vite Mobile Simulator, khởi động lại daemon `:8384`, cập nhật docs và chia thành 3 commit chuẩn Conventional Commits
+
+## Giai đoạn 24: Gom Tập Trung Hằng Số & Bộ Lọc File Bỏ Qua Vào `@foldersync/shared`
+- [x] **Task 24.1**: Tạo `packages/shared/src/sync-ignore.ts` (export qua `index.ts`) chứa tập trung `SYNC_TMP_DIR_NAME`, `UNSYNCED_BACKUP_DIR_NAME`, `SYSTEM_IGNORED_NAMES`, `TRANSIENT_FILE_PREFIXES`, `TRANSIENT_FILE_SUFFIXES` cùng 3 helper (`isInternalSyncArtifactName`, `shouldIgnoreSyncEntryName`, `shouldIgnoreSyncRelativePath`), viết unit test `packages/shared/test/sync-ignore.test.ts` và build `@foldersync/shared`
+- [x] **Task 24.2**: Refactor toàn bộ 5 file đang lặp (`folder-service.ts`, `file-indexer.ts`, `sync-coordinator.ts`, `platform-fs.ts`, `vite.mobile.config.ts`) sang dùng hằng số & helper từ `@foldersync/shared`
+- [x] **Task 24.3**: Cập nhật docs (`docs/system-architecture.md`, `docs/task.md`), kiểm chứng `pnpm -r build && pnpm test` + Vite Mobile Simulator build, và tạo 1 commit gọn riêng cho phần refactor này

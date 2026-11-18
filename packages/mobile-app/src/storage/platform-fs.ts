@@ -4,7 +4,7 @@ import * as Crypto from 'expo-crypto';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
-import { LIST_FILE_NAME } from '@foldersync/shared';
+import { LIST_FILE_NAME, shouldIgnoreSyncEntryName } from '@foldersync/shared';
 
 const { StorageAccessFramework } = FileSystem;
 
@@ -92,25 +92,7 @@ export async function computeSha256HexFromBase64(base64Content: string): Promise
 }
 
 export function shouldIgnoreSyncFileName(name: string): boolean {
-  if (!name) return true;
-  return (
-    name === '.git' ||
-    name === '.DS_Store' ||
-    name === 'Thumbs.db' ||
-    name === 'desktop.ini' ||
-    name.startsWith('.sync_tmp') ||
-    name.endsWith('.sync_tmp') ||
-    name.startsWith('.unsynced_local_backup') ||
-    name.startsWith('.~lock.') ||
-    name.startsWith('~$') ||
-    name.startsWith('.#') ||
-    name.endsWith('.swp') ||
-    name.endsWith('.swx') ||
-    name.endsWith('~') ||
-    name.endsWith('.tmp') ||
-    name.endsWith('.part') ||
-    name.endsWith('.crdownload')
-  );
+  return shouldIgnoreSyncEntryName(name, { ignoreListFile: false });
 }
 
 const NATIVE_CONFIG_FILE_URI = `${

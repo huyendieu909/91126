@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events';
 import {
   DEFAULT_ZONE_ID,
   DEFAULT_ZONE_NAME,
+  SYNC_TMP_DIR_NAME,
   diffListFiles,
   slugifyZoneId,
   type ExistingDataStrategy,
@@ -1423,7 +1424,7 @@ export class SyncCoordinator extends EventEmitter {
     entry: FileIndexEntry,
   ): Promise<void> {
     const normalizedRelPath = entry.relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
-    const tmpDir = path.join(syncFolderPath, '.sync_tmp');
+    const tmpDir = path.join(syncFolderPath, SYNC_TMP_DIR_NAME);
     await fs.mkdir(tmpDir, { recursive: true });
     const tmpFilePath = path.join(tmpDir, `dl_${crypto.randomUUID()}.tmp`);
     const finalFilePath = path.join(syncFolderPath, ...normalizedRelPath.split('/'));

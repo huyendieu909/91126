@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import { shouldIgnoreSyncEntryName } from '@foldersync/shared';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
@@ -43,28 +44,6 @@ function readEnvVarsFromFiles(): Record<string, string> {
   return result;
 }
 
-function shouldIgnoreSimFile(name: string): boolean {
-  return (
-    !name ||
-    name === '.git' ||
-    name === '.DS_Store' ||
-    name === 'Thumbs.db' ||
-    name === 'desktop.ini' ||
-    name.startsWith('.sync_tmp') ||
-    name.endsWith('.sync_tmp') ||
-    name.startsWith('.unsynced_local_backup') ||
-    name.startsWith('.~lock.') ||
-    name.startsWith('~$') ||
-    name.startsWith('.#') ||
-    name.endsWith('.swp') ||
-    name.endsWith('.swx') ||
-    name.endsWith('~') ||
-    name.endsWith('.tmp') ||
-    name.endsWith('.part') ||
-    name.endsWith('.crdownload')
-  );
-}
-
 function readRequestBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -96,7 +75,7 @@ async function walkSimDir(
 ): Promise<void> {
   const entries = await fs.readdir(currentDir, { withFileTypes: true });
   for (const entry of entries) {
-    if (shouldIgnoreSimFile(entry.name)) continue;
+    if (shouldIgnoreSyncEntryName(entry.name, { ignoreListFile: false })) continue;
     const full = path.join(currentDir, entry.name);
     const rel = path.relative(rootDir, full).replace(/\\/g, '/');
     if (rel === 'list-file.md') continue;

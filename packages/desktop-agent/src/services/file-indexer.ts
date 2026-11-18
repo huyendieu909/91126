@@ -4,56 +4,17 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   LIST_FILE_NAME,
+  SYNC_TMP_DIR_NAME,
   parseListFile,
   serializeListFile,
+  shouldIgnoreSyncRelativePath,
   type FileIndexEntry,
   type ListFileDocument,
 } from '@foldersync/shared';
 
-const IGNORED_BASENAMES = new Set([
-  LIST_FILE_NAME,
-  '.DS_Store',
-  'Thumbs.db',
-  'desktop.ini',
-]);
-
 export class FileIndexer {
   public shouldIgnoreRelativePath(relativePath: string): boolean {
-    const normalized = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
-    if (!normalized) return true;
-
-    const segments = normalized.split('/');
-    if (
-      segments.includes('.sync_tmp') ||
-      segments.includes('.unsynced_local_backup') ||
-      segments.includes('.git')
-    ) {
-      return true;
-    }
-
-    const base = segments[segments.length - 1];
-    if (IGNORED_BASENAMES.has(base)) {
-      return true;
-    }
-
-    if (
-      base.startsWith('.sync_tmp') ||
-      base.endsWith('.sync_tmp') ||
-      base.startsWith('.unsynced_local_backup') ||
-      base.startsWith('.~lock.') ||
-      base.startsWith('~$') ||
-      base.startsWith('.#') ||
-      base.endsWith('.swp') ||
-      base.endsWith('.swx') ||
-      base.endsWith('~') ||
-      base.endsWith('.tmp') ||
-      base.endsWith('.part') ||
-      base.endsWith('.crdownload')
-    ) {
-      return true;
-    }
-
-    return false;
+    return shouldIgnoreSyncRelativePath(relativePath);
   }
 
   public async computeFileSha256(filePath: string): Promise<string> {
@@ -85,7 +46,7 @@ export class FileIndexer {
     syncFolderPath: string,
     doc: ListFileDocument,
   ): Promise<void> {
-    const tmpDir = path.join(syncFolderPath, '.sync_tmp');
+    const tmpDir = path.join(syncFolderPath, SYNC_TMP_DIR_NAME);
     await fs.mkdir(tmpDir, { recursive: true });
 
     const tmpFile = path.join(tmpDir, `list-file.${process.pid}.${crypto.randomUUID()}.tmp`);
