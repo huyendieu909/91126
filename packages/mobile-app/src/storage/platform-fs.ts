@@ -1,7 +1,10 @@
 import { Linking, Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Crypto from 'expo-crypto';
-import { LIST_FILE_NAME } from '@foldersync/shared';
+import * as IntentLauncher from 'expo-intent-launcher';
+import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
+import { LIST_FILE_NAME, shouldIgnoreSyncEntryName } from '@foldersync/shared';
 
 const { StorageAccessFramework } = FileSystem;
 
@@ -89,25 +92,7 @@ export async function computeSha256HexFromBase64(base64Content: string): Promise
 }
 
 export function shouldIgnoreSyncFileName(name: string): boolean {
-  if (!name) return true;
-  return (
-    name === '.git' ||
-    name === '.DS_Store' ||
-    name === 'Thumbs.db' ||
-    name === 'desktop.ini' ||
-    name.startsWith('.sync_tmp') ||
-    name.endsWith('.sync_tmp') ||
-    name.startsWith('.unsynced_local_backup') ||
-    name.startsWith('.~lock.') ||
-    name.startsWith('~$') ||
-    name.startsWith('.#') ||
-    name.endsWith('.swp') ||
-    name.endsWith('.swx') ||
-    name.endsWith('~') ||
-    name.endsWith('.tmp') ||
-    name.endsWith('.part') ||
-    name.endsWith('.crdownload')
-  );
+  return shouldIgnoreSyncEntryName(name, { ignoreListFile: false });
 }
 
 const NATIVE_CONFIG_FILE_URI = `${
@@ -592,15 +577,157 @@ export async function openPlatformFileExternal(
     throw new Error('Không tìm thấy URI của file trên thiết bị.');
   }
 
+  // Copy SAF document to cache first so external players get a valid FileProvider URI
+  // with FLAG_GRANT_READ_URI_PERMISSION and explicit MIME type.
+  const rawBaseName = relativePath.split('/').pop() || 'file';
+  const safeBaseName = rawBaseName.replace(/[^\p{L}\p{N}._-]/gu, '_');
+  const cacheDir = `${FileSystem.cacheDirectory ?? ''}foldersync_open/`;
+  await FileSystem.deleteAsync(cacheDir, { idempotent: true }).catch(() => undefined);
+  await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true }).catch(() => undefined);
+  const localCacheUri = `${cacheDir}${Date.now()}_${safeBaseName}`;
+
   try {
-    await Linking.openURL(fileUri);
-    return;
-  } catch {
-    // Fallback: copy to app cache and generate FileProvider content URI
-    const safeName = relativePath.split('/').pop() || 'file';
-    const localCacheUri = `${FileSystem.cacheDirectory ?? ''}open_${Date.now()}_${safeName}`;
     await FileSystem.copyAsync({ from: fileUri, to: localCacheUri });
-    const contentUri = await FileSystem.getContentUriAsync(localCacheUri);
-    await Linking.openURL(contentUri);
+  } catch {
+    const b64 = await FileSystem.readAsStringAsync(fileUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    await FileSystem.writeAsStringAsync(localCacheUri, b64, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
   }
+
+  const contentUri = await FileSystem.getContentUriAsync(localCacheUri);
+  if (Platform.OS === 'android') {
+    await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+      data: contentUri,
+      flags: 1, // Intent.FLAG_GRANT_READ_URI_PERMISSION
+      type: mimeType,
+    });
+    return;
+  }
+
+  await Linking.openURL(contentUri);
+}
+
+export type MessengerUploadKind = 'IMAGE' | 'VIDEO' | 'MEDIA' | 'DOCUMENT';
+
+function inferExtensionFromMime(mimeType?: string | null, fallbackKind?: MessengerUploadKind): string {
+  if (mimeType) {
+    const sub = mimeType.split('/')[1]?.split(';')[0]?.toLowerCase();
+    if (sub === 'jpeg') return 'jpg';
+    if (sub === 'quicktime') return 'mov';
+    if (sub === 'x-matroska') return 'mkv';
+    if (sub && /^[a-z0-9]{2,6}$/.test(sub)) return sub;
+  }
+  if (fallbackKind === 'VIDEO') return 'mp4';
+  if (fallbackKind === 'IMAGE') return 'jpg';
+  return 'bin';
+}
+
+export async function pickAndCopyFilesToSyncFolder(options: {
+  directoryUri: string;
+  uriMap: Map<string, string>;
+  targetSubDir?: string;
+  kind: MessengerUploadKind;
+}): Promise<string[]> {
+  const { directoryUri, uriMap, targetSubDir, kind } = options;
+
+  interface PickedAsset {
+    uri: string;
+    name: string;
+    mimeType?: string | null;
+  }
+  const assets: PickedAsset[] = [];
+
+  if (kind === 'DOCUMENT') {
+    const docRes = await DocumentPicker.getDocumentAsync({
+      multiple: true,
+      copyToCacheDirectory: true,
+    });
+    if (docRes.canceled || !docRes.assets || docRes.assets.length === 0) {
+      return [];
+    }
+    for (const a of docRes.assets) {
+      assets.push({
+        uri: a.uri,
+        name: a.name || a.uri.split('/').pop() || `doc_${Date.now()}.bin`,
+        mimeType: a.mimeType,
+      });
+    }
+  } else {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      throw new Error('Vui lòng cấp quyền truy cập Thư viện ảnh & video cho ứng dụng.');
+    }
+    const mediaTypes: ImagePicker.MediaType[] =
+      kind === 'IMAGE'
+        ? ['images']
+        : kind === 'VIDEO'
+          ? ['videos']
+          : ['images', 'videos'];
+    const imgRes = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes,
+      allowsMultipleSelection: true,
+      quality: 1,
+    });
+    if (imgRes.canceled || !imgRes.assets || imgRes.assets.length === 0) {
+      return [];
+    }
+    for (let i = 0; i < imgRes.assets.length; i++) {
+      const a = imgRes.assets[i];
+      const ext = inferExtensionFromMime(a.mimeType, a.type === 'video' ? 'VIDEO' : 'IMAGE');
+      const rawName = a.fileName || decodeURIComponent(a.uri.split('/').pop() || '');
+      const fallbackName = `${a.type === 'video' ? 'video' : 'image'}_${Date.now()}_${i + 1}.${ext}`;
+      const chosenName =
+        rawName && rawName.includes('.') ? rawName : fallbackName;
+      assets.push({
+        uri: a.uri,
+        name: chosenName,
+        mimeType: a.mimeType,
+      });
+    }
+  }
+
+  const copiedPaths: string[] = [];
+  const cleanPrefix = targetSubDir ? targetSubDir.replace(/^\/+|\/+$/g, '') : '';
+
+  for (const asset of assets) {
+    const safeFileName = asset.name.replace(/[\\/]+/g, '_').trim() || `file_${Date.now()}`;
+    const relPath = cleanPrefix ? `${cleanPrefix}/${safeFileName}` : safeFileName;
+
+    let b64 = '';
+    if (isWebSimulator()) {
+      try {
+        const res = await fetch(asset.uri);
+        const buf = await res.arrayBuffer();
+        b64 = uint8ArrayToBase64(new Uint8Array(buf));
+      } finally {
+        if (asset.uri.startsWith('blob:')) {
+          URL.revokeObjectURL(asset.uri);
+        }
+      }
+    } else {
+      try {
+        b64 = await FileSystem.readAsStringAsync(asset.uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+      } catch {
+        const tmpUri = `${FileSystem.cacheDirectory ?? ''}pick_${Date.now()}_${safeFileName}`;
+        await FileSystem.copyAsync({ from: asset.uri, to: tmpUri });
+        try {
+          b64 = await FileSystem.readAsStringAsync(tmpUri, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+        } finally {
+          await FileSystem.deleteAsync(tmpUri, { idempotent: true });
+        }
+      }
+    }
+
+    await writePlatformFile(directoryUri, uriMap, relPath, b64, true);
+    copiedPaths.push(relPath);
+  }
+
+  return copiedPaths;
 }

@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events';
 import {
   DEFAULT_ZONE_ID,
   DEFAULT_ZONE_NAME,
+  SYNC_TMP_DIR_NAME,
   diffListFiles,
   slugifyZoneId,
   type ExistingDataStrategy,
@@ -867,21 +868,26 @@ export class SyncCoordinator extends EventEmitter {
     const diff = diffListFiles(localDoc.entries, remoteDoc, baselineHashes);
     this.setProgress('PREPARING', 0, 0, null, 'Đang tính toán thay đổi cần đồng bộ...');
 
+    let syncedDevicesAckChanged = false;
     const finalEntriesMap = new Map<string, FileIndexEntry>();
     for (const entry of remoteDoc.entries) {
       const localMatch = localActiveMap.get(entry.relativePath);
       if (entry.status === 'ACTIVE' && localMatch && localMatch.sha256 === entry.sha256) {
-        const mergedSynced = Array.from(
-          new Set([...(entry.syncedDevices ?? [entry.updatedBy]), deviceName]),
-        );
+        const prevSynced = entry.syncedDevices ?? [entry.updatedBy];
+        const mergedSynced = Array.from(new Set([...prevSynced, deviceName]));
+        if (!entry.syncedDevices || mergedSynced.length !== prevSynced.length) {
+          syncedDevicesAckChanged = true;
+        }
         finalEntriesMap.set(entry.relativePath, {
           ...entry,
           syncedDevices: mergedSynced,
         });
       } else if (entry.status === 'DELETED' && !localMatch) {
-        const mergedDelSynced = Array.from(
-          new Set([...(entry.syncedDevices ?? [entry.updatedBy]), deviceName]),
-        );
+        const prevDelSynced = entry.syncedDevices ?? [entry.updatedBy];
+        const mergedDelSynced = Array.from(new Set([...prevDelSynced, deviceName]));
+        if (!entry.syncedDevices || mergedDelSynced.length !== prevDelSynced.length) {
+          syncedDevicesAckChanged = true;
+        }
         finalEntriesMap.set(entry.relativePath, {
           ...entry,
           syncedDevices: mergedDelSynced,
@@ -1261,6 +1267,9 @@ export class SyncCoordinator extends EventEmitter {
 
     const shouldWriteRemote =
       pushedChanges ||
+      downloadedPaths.length > 0 ||
+      deletedLocallyPaths.length > 0 ||
+      syncedDevicesAckChanged ||
       relayPurgedCount > 0 ||
       newDeviceJoined ||
       (!remoteExisting && finalEntriesMap.size > 0);
@@ -1280,19 +1289,43 @@ export class SyncCoordinator extends EventEmitter {
       entries: sortedEntries,
     };
 
-    if (shouldWriteRemote) {
-      const listFileDriveId = await this.cloudProvider.writeRemoteListFile(finalDoc, zoneId);
+    const preWriteCfg = shouldWriteRemote ? await this.configService.loadConfig() : null;
+    const localZoneBeforeWrite = preWriteCfg
+      ? (preWriteCfg.zones ?? []).find((z) => z.zoneId === zoneId)
+      : undefined;
+    const prevMembersSorted = [...(localZoneBeforeWrite?.memberDevices ?? [])].sort().join(',');
+    const nextMembersSorted = [...knownDevices].sort().join(',');
 
-      // Update zone registry if available
-      if (this.cloudProvider.readZonesRegistry && this.cloudProvider.writeZonesRegistry) {
+    let writtenListFileDriveId: string | null = null;
+    if (shouldWriteRemote) {
+      writtenListFileDriveId = await this.cloudProvider.writeRemoteListFile(finalDoc, zoneId);
+
+      // Update zone registry only when membership or listFileDriveId actually changed
+      const registryNeedsSync =
+        newDeviceJoined ||
+        !remoteExisting ||
+        localZoneBeforeWrite?.listFileDriveId !== writtenListFileDriveId ||
+        prevMembersSorted !== nextMembersSorted;
+
+      if (
+        registryNeedsSync &&
+        this.cloudProvider.readZonesRegistry &&
+        this.cloudProvider.writeZonesRegistry
+      ) {
         try {
           const reg = await this.cloudProvider.readZonesRegistry();
           const zIdx = reg.zones.findIndex((z) => z.zoneId === zoneId);
           if (zIdx >= 0) {
-            reg.zones[zIdx].memberDevices = knownDevices;
-            reg.zones[zIdx].listFileDriveId = listFileDriveId;
-            reg.updatedAt = nowIso;
-            await this.cloudProvider.writeZonesRegistry(reg);
+            const remoteMembersSorted = [...(reg.zones[zIdx].memberDevices ?? [])].sort().join(',');
+            if (
+              remoteMembersSorted !== nextMembersSorted ||
+              reg.zones[zIdx].listFileDriveId !== writtenListFileDriveId
+            ) {
+              reg.zones[zIdx].memberDevices = knownDevices;
+              reg.zones[zIdx].listFileDriveId = writtenListFileDriveId;
+              reg.updatedAt = nowIso;
+              await this.cloudProvider.writeZonesRegistry(reg);
+            }
           }
         } catch {
           // Ignore registry sync error
@@ -1358,6 +1391,7 @@ export class SyncCoordinator extends EventEmitter {
       z.zoneId === zoneId
         ? {
             ...z,
+            listFileDriveId: writtenListFileDriveId ?? z.listFileDriveId ?? null,
             lastSyncedRevision: nextRevision,
             lastSyncedAt: nowIso,
             memberDevices: knownDevices,
@@ -1390,7 +1424,7 @@ export class SyncCoordinator extends EventEmitter {
     entry: FileIndexEntry,
   ): Promise<void> {
     const normalizedRelPath = entry.relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
-    const tmpDir = path.join(syncFolderPath, '.sync_tmp');
+    const tmpDir = path.join(syncFolderPath, SYNC_TMP_DIR_NAME);
     await fs.mkdir(tmpDir, { recursive: true });
     const tmpFilePath = path.join(tmpDir, `dl_${crypto.randomUUID()}.tmp`);
     const finalFilePath = path.join(syncFolderPath, ...normalizedRelPath.split('/'));

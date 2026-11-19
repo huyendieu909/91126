@@ -527,6 +527,7 @@ export async function runAndroidSyncNow(
 ): Promise<{
   summary: SyncRunSummary;
   document: ListFileDocument;
+  uriMap: Map<string, string>;
 }> {
   const report = (progress: SyncProgress | null) => {
     onProgress?.(progress);
@@ -609,22 +610,29 @@ export async function runAndroidSyncNow(
     const zoneBaseline = state.zoneBaselines?.[activeZoneId] ?? state.baselineHashes;
     const diff = diffListFiles(localDoc.entries, remoteDoc, zoneBaseline);
     report(makeProgress('PREPARING', 0, 0, null, 'Đang tính toán thay đổi cần đồng bộ...'));
+    let syncedDevicesAckChanged = false;
     const finalMap = new Map<string, FileIndexEntry>();
     for (const e of remoteDoc.entries) {
       const localMatch = localActiveMap.get(e.relativePath);
       if (e.status === 'ACTIVE' && localMatch && localMatch.sha256 === e.sha256) {
+        const prevSynced = e.syncedDevices ?? [e.updatedBy];
+        const mergedSynced = Array.from(new Set([...prevSynced, state.deviceName]));
+        if (!e.syncedDevices || mergedSynced.length !== prevSynced.length) {
+          syncedDevicesAckChanged = true;
+        }
         finalMap.set(e.relativePath, {
           ...e,
-          syncedDevices: Array.from(
-            new Set([...(e.syncedDevices ?? [e.updatedBy]), state.deviceName]),
-          ),
+          syncedDevices: mergedSynced,
         });
       } else if (e.status === 'DELETED' && !localMatch) {
+        const prevDelSynced = e.syncedDevices ?? [e.updatedBy];
+        const mergedDelSynced = Array.from(new Set([...prevDelSynced, state.deviceName]));
+        if (!e.syncedDevices || mergedDelSynced.length !== prevDelSynced.length) {
+          syncedDevicesAckChanged = true;
+        }
         finalMap.set(e.relativePath, {
           ...e,
-          syncedDevices: Array.from(
-            new Set([...(e.syncedDevices ?? [e.updatedBy]), state.deviceName]),
-          ),
+          syncedDevices: mergedDelSynced,
         });
       } else {
         finalMap.set(e.relativePath, e);
@@ -870,7 +878,13 @@ export async function runAndroidSyncNow(
       conflictsCount > 0 ||
       requestedReuploadCount > 0;
     const shouldWriteRemote =
-      pushed || relayPurgedCount > 0 || newDeviceJoined || (!listFileId && finalMap.size > 0);
+      pushed ||
+      downloadedCount > 0 ||
+      deletedLocallyCount > 0 ||
+      syncedDevicesAckChanged ||
+      relayPurgedCount > 0 ||
+      newDeviceJoined ||
+      (!listFileId && finalMap.size > 0);
     const nowIso = new Date().toISOString();
     const nextRev = pushed ? remoteDoc.revision + 1 : remoteDoc.revision;
 
@@ -1008,6 +1022,7 @@ export async function runAndroidSyncNow(
         completedAt: nowIso,
       },
       document: finalDoc,
+      uriMap,
     };
   } finally {
     report(null);

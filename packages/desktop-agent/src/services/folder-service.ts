@@ -4,7 +4,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import {
+  GIT_DIR_NAME,
   LIST_FILE_NAME,
+  UNSYNCED_BACKUP_DIR_NAME,
+  isInternalSyncArtifactName,
+  shouldIgnoreSyncEntryName,
   type DirectoryBrowseResult,
   type DirectoryEntry,
   type ExistingDataStrategy,
@@ -71,7 +75,7 @@ export class FolderService extends EventEmitter {
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (entry.name === '.sync_tmp' || entry.name === '.unsynced_local_backup') continue;
+      if (isInternalSyncArtifactName(entry.name)) continue;
       directories.push({
         name: entry.name,
         path: path.join(resolvedPath, entry.name),
@@ -200,15 +204,7 @@ export class FolderService extends EventEmitter {
       let count = 0;
       for (const entry of entries) {
         if (count >= maxCount) break;
-        if (
-          entry.name === LIST_FILE_NAME ||
-          entry.name === '.sync_tmp' ||
-          entry.name === '.unsynced_local_backup' ||
-          entry.name === '.git' ||
-          entry.name === '.DS_Store' ||
-          entry.name === 'Thumbs.db' ||
-          entry.name === 'desktop.ini'
-        ) {
+        if (shouldIgnoreSyncEntryName(entry.name, { ignoreListFile: true })) {
           continue;
         }
         if (
@@ -247,10 +243,9 @@ export class FolderService extends EventEmitter {
     const entries = await fs.readdir(targetDir, { withFileTypes: true });
     const movable = entries.filter(
       (e) =>
-        e.name !== '.sync_tmp' &&
-        e.name !== '.unsynced_local_backup' &&
+        !isInternalSyncArtifactName(e.name) &&
         e.name !== LIST_FILE_NAME &&
-        e.name !== '.git',
+        e.name !== GIT_DIR_NAME,
     );
 
     if (movable.length === 0) {
@@ -259,7 +254,7 @@ export class FolderService extends EventEmitter {
 
     const movedFilesCount = await this.countExistingSyncableFiles(targetDir);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupDir = path.join(targetDir, '.unsynced_local_backup', stamp);
+    const backupDir = path.join(targetDir, UNSYNCED_BACKUP_DIR_NAME, stamp);
     await fs.mkdir(backupDir, { recursive: true });
 
     for (const entry of movable) {
@@ -286,7 +281,7 @@ export class FolderService extends EventEmitter {
     let count = 0;
 
     for (const entry of entries) {
-      if (entry.name === '.sync_tmp' || entry.name === '.unsynced_local_backup') continue;
+      if (isInternalSyncArtifactName(entry.name)) continue;
 
       const srcFullPath = path.join(srcDir, entry.name);
       const destFullPath = path.join(destDir, entry.name);
