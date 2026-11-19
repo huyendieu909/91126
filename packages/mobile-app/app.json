@@ -12,6 +12,9 @@
         "WRITE_EXTERNAL_STORAGE",
         "INTERNET"
       ]
-    }
+    },
+    "plugins": [
+      "expo-status-bar"
+    ]
   }
 }

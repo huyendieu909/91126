@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:mobile": "vite --config vite.mobile.config.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "echo \"web-ui tests placeholder\""

@@ -19,17 +19,15 @@ export * from './services/telegram-service.js';
 export * from './services/sync-coordinator.js';
 export * from './server.js';
 
-const isMainModule =
-  import.meta.url === `file://${process.argv[1]}` ||
-  process.argv[1]?.endsWith('desktop-agent/src/index.ts') ||
-  process.argv[1]?.endsWith('desktop-agent/dist/index.js');
-
-if (isMainModule) {
-  const port = Number(process.env.PORT || 8384);
+export function startAgentServer(options?: {
+  port?: number;
+  customConfigPath?: string;
+}): void {
+  const port = options?.port ?? Number(process.env.PORT || 8384);
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const staticWebDir = path.resolve(__dirname, '../../web-ui/dist');
 
-  const configService = new ConfigService();
+  const configService = new ConfigService(options?.customConfigPath);
   const folderService = new FolderService(configService);
   const fileIndexer = new FileIndexer();
   const folderWatcher = new FolderWatcher(configService, folderService, fileIndexer);
@@ -46,7 +44,9 @@ if (isMainModule) {
   );
 
   void folderWatcher.start().then(() => {
-    void syncCoordinator.syncNow('STARTUP');
+    void syncCoordinator.syncNow('STARTUP').catch(() => undefined);
+    const bgPollMs = Number(process.env.SYNC_POLL_INTERVAL_MS || 15000);
+    syncCoordinator.startBackgroundSync(bgPollMs);
   });
   telegramService.start();
 
@@ -65,4 +65,13 @@ if (isMainModule) {
   server.listen(port, () => {
     console.log(`[FolderSync Agent] Running on http://localhost:${port}`);
   });
+}
+
+const isMainModule =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith('desktop-agent/src/index.ts') ||
+  process.argv[1]?.endsWith('desktop-agent/dist/index.js');
+
+if (isMainModule) {
+  startAgentServer();
 }

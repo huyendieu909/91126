@@ -3,11 +3,13 @@ import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
-import type {
-  DirectoryBrowseResult,
-  DirectoryEntry,
-  SwitchFolderMode,
-  SwitchFolderResult,
+import {
+  LIST_FILE_NAME,
+  type DirectoryBrowseResult,
+  type DirectoryEntry,
+  type ExistingDataStrategy,
+  type SwitchFolderMode,
+  type SwitchFolderResult,
 } from '@foldersync/shared';
 import type { ConfigService } from './config-service.js';
 
@@ -16,6 +18,9 @@ export interface FolderChangedEvent {
   newPath: string;
   mode: SwitchFolderMode;
   copiedFilesCount: number;
+  existingDataStrategy?: ExistingDataStrategy;
+  isolatedFilesCount?: number;
+  isolatedBackupPath?: string | null;
 }
 
 export class FolderService extends EventEmitter {
@@ -66,7 +71,7 @@ export class FolderService extends EventEmitter {
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (entry.name === '.sync_tmp') continue;
+      if (entry.name === '.sync_tmp' || entry.name === '.unsynced_local_backup') continue;
       directories.push({
         name: entry.name,
         path: path.join(resolvedPath, entry.name),
@@ -75,6 +80,11 @@ export class FolderService extends EventEmitter {
 
     directories.sort((a, b) => a.name.localeCompare(b.name));
 
+    const existingFilesCount = await this.countExistingSyncableFiles(resolvedPath, {
+      maxCount: 100,
+      maxDepth: 2,
+      skipHiddenAndHeavy: true,
+    });
     const parsed = path.parse(resolvedPath);
     const parentPath = parsed.root === resolvedPath ? null : path.dirname(resolvedPath);
     const roots = await this.getSystemRoots();
@@ -84,6 +94,7 @@ export class FolderService extends EventEmitter {
       parentPath,
       roots,
       directories,
+      existingFilesCount,
     };
   }
 
@@ -100,12 +111,19 @@ export class FolderService extends EventEmitter {
   public async switchSyncFolder(
     newPathInput: string,
     mode: SwitchFolderMode = 'POINT_ONLY',
+    existingDataStrategy: ExistingDataStrategy = 'MERGE_ALL',
+    options?: { skipConfigSave?: boolean },
   ): Promise<SwitchFolderResult> {
     if (!newPathInput || !newPathInput.trim()) {
       throw new Error('Đường dẫn thư mục đồng bộ không được để trống.');
     }
 
-    const newPath = path.resolve(newPathInput);
+    const rawResolved = path.resolve(newPathInput);
+    const newPath =
+      existingDataStrategy === 'CREATE_SUBFOLDER'
+        ? path.join(rawResolved, 'FolderSync')
+        : rawResolved;
+
     const currentConfig = await this.configService.loadConfig();
     const previousPath = currentConfig.syncFolderPath
       ? path.resolve(currentConfig.syncFolderPath)
@@ -125,6 +143,15 @@ export class FolderService extends EventEmitter {
     await fs.mkdir(newPath, { recursive: true });
     await fs.access(newPath, fsConstants.R_OK | fsConstants.W_OK);
 
+    let isolatedFilesCount = 0;
+    let isolatedBackupPath: string | null = null;
+
+    if (existingDataStrategy === 'ISOLATE_BACKUP') {
+      const iso = await this.isolateExistingFiles(newPath);
+      isolatedFilesCount = iso.movedFilesCount;
+      isolatedBackupPath = iso.backupDir;
+    }
+
     let copiedFilesCount = 0;
 
     if (mode === 'COPY_EXISTING' && previousPath && previousPath !== newPath) {
@@ -134,17 +161,114 @@ export class FolderService extends EventEmitter {
       }
     }
 
-    await this.configService.saveConfig({ syncFolderPath: newPath });
+    if (!options?.skipConfigSave) {
+      await this.configService.saveConfig({ syncFolderPath: newPath });
+    }
 
     const result: SwitchFolderResult = {
       previousPath,
       newPath,
       mode,
       copiedFilesCount,
+      existingDataStrategy,
+      isolatedFilesCount,
+      isolatedBackupPath,
     };
 
-    this.emit('folderChanged', result satisfies FolderChangedEvent);
+    if (!options?.skipConfigSave) {
+      this.emit('folderChanged', result satisfies FolderChangedEvent);
+    }
     return result;
+  }
+
+  public async countExistingSyncableFiles(
+    dirPath: string,
+    options?: {
+      maxCount?: number;
+      maxDepth?: number;
+      currentDepth?: number;
+      skipHiddenAndHeavy?: boolean;
+    },
+  ): Promise<number> {
+    const maxCount = options?.maxCount ?? Number.POSITIVE_INFINITY;
+    const maxDepth = options?.maxDepth ?? Number.POSITIVE_INFINITY;
+    const currentDepth = options?.currentDepth ?? 0;
+    const skipHiddenAndHeavy = options?.skipHiddenAndHeavy ?? false;
+
+    try {
+      const entries = await fs.readdir(dirPath, { withFileTypes: true });
+      let count = 0;
+      for (const entry of entries) {
+        if (count >= maxCount) break;
+        if (
+          entry.name === LIST_FILE_NAME ||
+          entry.name === '.sync_tmp' ||
+          entry.name === '.unsynced_local_backup' ||
+          entry.name === '.git' ||
+          entry.name === '.DS_Store' ||
+          entry.name === 'Thumbs.db' ||
+          entry.name === 'desktop.ini'
+        ) {
+          continue;
+        }
+        if (
+          skipHiddenAndHeavy &&
+          (entry.name.startsWith('.') ||
+            entry.name === 'node_modules' ||
+            entry.name === 'proc' ||
+            entry.name === 'sys' ||
+            entry.name === 'dev')
+        ) {
+          continue;
+        }
+        const fullPath = path.join(dirPath, entry.name);
+        if (entry.isDirectory()) {
+          if (currentDepth < maxDepth) {
+            count += await this.countExistingSyncableFiles(fullPath, {
+              maxCount: maxCount - count,
+              maxDepth,
+              currentDepth: currentDepth + 1,
+              skipHiddenAndHeavy,
+            });
+          }
+        } else if (entry.isFile()) {
+          count += 1;
+        }
+      }
+      return count;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async isolateExistingFiles(
+    targetDir: string,
+  ): Promise<{ movedFilesCount: number; backupDir: string | null }> {
+    const entries = await fs.readdir(targetDir, { withFileTypes: true });
+    const movable = entries.filter(
+      (e) =>
+        e.name !== '.sync_tmp' &&
+        e.name !== '.unsynced_local_backup' &&
+        e.name !== LIST_FILE_NAME &&
+        e.name !== '.git',
+    );
+
+    if (movable.length === 0) {
+      return { movedFilesCount: 0, backupDir: null };
+    }
+
+    const movedFilesCount = await this.countExistingSyncableFiles(targetDir);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupDir = path.join(targetDir, '.unsynced_local_backup', stamp);
+    await fs.mkdir(backupDir, { recursive: true });
+
+    for (const entry of movable) {
+      const src = path.join(targetDir, entry.name);
+      const dest = path.join(backupDir, entry.name);
+      await fs.rename(src, dest);
+    }
+
+    return { movedFilesCount, backupDir };
   }
 
   private async directoryExists(dirPath: string): Promise<boolean> {
@@ -162,7 +286,7 @@ export class FolderService extends EventEmitter {
     let count = 0;
 
     for (const entry of entries) {
-      if (entry.name === '.sync_tmp') continue;
+      if (entry.name === '.sync_tmp' || entry.name === '.unsynced_local_backup') continue;
 
       const srcFullPath = path.join(srcDir, entry.name);
       const destFullPath = path.join(destDir, entry.name);

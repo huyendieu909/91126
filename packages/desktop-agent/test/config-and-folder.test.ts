@@ -144,4 +144,45 @@ describe('Phase 2: ConfigService, FolderService & HTTP API', () => {
     expect(oldContent).toBe('Stay in A');
     await expect(fs.stat(path.join(folderC, 'keep-in-a.txt'))).rejects.toThrow();
   });
+
+  it('detects existing files in target folder and supports ISOLATE_BACKUP and CREATE_SUBFOLDER strategies', async () => {
+    const prePopulatedDir = path.join(tmpRoot, 'existing-data-dir');
+    await fs.mkdir(prePopulatedDir, { recursive: true });
+    await fs.writeFile(path.join(prePopulatedDir, 'personal-1.txt'), 'Secret 1', 'utf-8');
+    await fs.writeFile(path.join(prePopulatedDir, 'personal-2.txt'), 'Secret 2', 'utf-8');
+
+    const browseRes = await fetch(
+      `${baseUrl}/api/fs/browse?path=${encodeURIComponent(prePopulatedDir)}`,
+    );
+    const browseData = (await browseRes.json()) as DirectoryBrowseResult;
+    expect(browseData.existingFilesCount).toBe(2);
+
+    // Strategy 1: ISOLATE_BACKUP moves existing files into .unsynced_local_backup
+    const isoRes = await fetch(`${baseUrl}/api/config/switch-folder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        newPath: prePopulatedDir,
+        mode: 'POINT_ONLY',
+        existingDataStrategy: 'ISOLATE_BACKUP',
+      }),
+    });
+    const isoPayload = (await isoRes.json()) as { result: SwitchFolderResult };
+    expect(isoPayload.result.isolatedFilesCount).toBe(2);
+    expect(isoPayload.result.isolatedBackupPath).toContain('.unsynced_local_backup');
+    await expect(fs.stat(path.join(prePopulatedDir, 'personal-1.txt'))).rejects.toThrow();
+
+    // Strategy 2: CREATE_SUBFOLDER creates and points to <dir>/FolderSync
+    const subRes = await fetch(`${baseUrl}/api/config/switch-folder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        newPath: prePopulatedDir,
+        mode: 'POINT_ONLY',
+        existingDataStrategy: 'CREATE_SUBFOLDER',
+      }),
+    });
+    const subPayload = (await subRes.json()) as { result: SwitchFolderResult };
+    expect(subPayload.result.newPath).toBe(path.join(prePopulatedDir, 'FolderSync'));
+  });
 });

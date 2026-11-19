@@ -23,7 +23,11 @@ export class FileIndexer {
     if (!normalized) return true;
 
     const segments = normalized.split('/');
-    if (segments.includes('.sync_tmp') || segments.includes('.git')) {
+    if (
+      segments.includes('.sync_tmp') ||
+      segments.includes('.unsynced_local_backup') ||
+      segments.includes('.git')
+    ) {
       return true;
     }
 
@@ -32,7 +36,20 @@ export class FileIndexer {
       return true;
     }
 
-    if (base.startsWith('.sync_tmp') || base.endsWith('.sync_tmp')) {
+    if (
+      base.startsWith('.sync_tmp') ||
+      base.endsWith('.sync_tmp') ||
+      base.startsWith('.unsynced_local_backup') ||
+      base.startsWith('.~lock.') ||
+      base.startsWith('~$') ||
+      base.startsWith('.#') ||
+      base.endsWith('.swp') ||
+      base.endsWith('.swx') ||
+      base.endsWith('~') ||
+      base.endsWith('.tmp') ||
+      base.endsWith('.part') ||
+      base.endsWith('.crdownload')
+    ) {
       return true;
     }
 
@@ -71,7 +88,7 @@ export class FileIndexer {
     const tmpDir = path.join(syncFolderPath, '.sync_tmp');
     await fs.mkdir(tmpDir, { recursive: true });
 
-    const tmpFile = path.join(tmpDir, `list-file.${process.pid}.${Date.now()}.tmp`);
+    const tmpFile = path.join(tmpDir, `list-file.${process.pid}.${crypto.randomUUID()}.tmp`);
     const targetFile = path.join(syncFolderPath, LIST_FILE_NAME);
     const markdown = serializeListFile(doc);
 
@@ -127,7 +144,13 @@ export class FileIndexer {
         continue;
       }
 
-      const sha256 = await this.computeFileSha256(fullPath);
+      let sha256: string;
+      try {
+        sha256 = await this.computeFileSha256(fullPath);
+      } catch {
+        // File disappeared right between stat and stream read
+        continue;
+      }
 
       if (prev && prev.status === 'ACTIVE' && prev.sha256 === sha256) {
         // Content hash is identical even if mtime touched
@@ -149,6 +172,7 @@ export class FileIndexer {
         status: 'ACTIVE',
         updatedBy: deviceName,
         driveFileId: '-',
+        syncedDevices: [deviceName],
       });
     }
 
@@ -158,6 +182,10 @@ export class FileIndexer {
       if (seenOnDisk.has(relPath)) continue;
 
       if (prev.status === 'ACTIVE') {
+        if (prev.syncedDevices && !prev.syncedDevices.includes(deviceName)) {
+          // File chưa được tải về máy này (đang chờ trạm trung chuyển đẩy lại) -> không đánh dấu xóa
+          continue;
+        }
         changed = true;
         nextEntries.push({
           relativePath: relPath,

@@ -3,7 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { URL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import { serializeListFile, type SwitchFolderMode } from '@foldersync/shared';
+import {
+  serializeListFile,
+  type ExistingDataStrategy,
+  type SwitchFolderMode,
+} from '@foldersync/shared';
 import { ConfigService } from './services/config-service.js';
 import { FolderService } from './services/folder-service.js';
 import { FileIndexer } from './services/file-indexer.js';
@@ -114,45 +118,72 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
 
       // POST /api/config/switch-folder
       if (req.method === 'POST' && pathname === '/api/config/switch-folder') {
-        const body = await readJsonBody<{ newPath: string; mode?: SwitchFolderMode }>(req);
+        const body = await readJsonBody<{
+          newPath: string;
+          mode?: SwitchFolderMode;
+          existingDataStrategy?: ExistingDataStrategy;
+        }>(req);
         const mode: SwitchFolderMode =
           body.mode === 'COPY_EXISTING' ? 'COPY_EXISTING' : 'POINT_ONLY';
-        const result = await ctx.folderService.switchSyncFolder(body.newPath, mode);
+        const strategy: ExistingDataStrategy =
+          body.existingDataStrategy === 'ISOLATE_BACKUP' ||
+          body.existingDataStrategy === 'CREATE_SUBFOLDER'
+            ? body.existingDataStrategy
+            : 'MERGE_ALL';
+        const result = await ctx.folderService.switchSyncFolder(body.newPath, mode, strategy);
         const config = await ctx.configService.getPublicConfig();
         sendJson(res, 200, { result, config });
         return;
       }
 
-      // GET /api/index
+      // GET /api/index (?zoneId=...)
       if (req.method === 'GET' && pathname === '/api/index') {
         const cfg = await ctx.configService.loadConfig();
-        if (!cfg.syncFolderPath) {
+        const requestedZoneId = reqUrl.searchParams.get('zoneId')?.trim();
+        const activeZoneId = cfg.activeZoneId || 'default-zone';
+        const targetZone = requestedZoneId
+          ? (cfg.zones ?? []).find((z) => z.zoneId === requestedZoneId && z.joined)
+          : (cfg.zones ?? []).find((z) => z.zoneId === activeZoneId && z.joined);
+        const targetFolderPath = targetZone?.localFolderPath || (requestedZoneId ? null : cfg.syncFolderPath);
+
+        if (!targetFolderPath) {
           sendJson(res, 200, {
             configured: false,
             document: null,
             markdown: '',
+            zoneId: requestedZoneId || activeZoneId,
+            zoneName: targetZone?.zoneName ?? null,
           });
           return;
         }
-        const doc = await indexer.readLocalListFile(cfg.syncFolderPath);
+        const doc = await indexer.readLocalListFile(targetFolderPath);
         sendJson(res, 200, {
           configured: true,
           document: doc,
           markdown: serializeListFile(doc),
+          zoneId: targetZone?.zoneId ?? activeZoneId,
+          zoneName: targetZone?.zoneName ?? null,
         });
         return;
       }
 
-      // POST /api/index/rescan
+      // POST /api/index/rescan (?zoneId=...)
       if (req.method === 'POST' && pathname === '/api/index/rescan') {
         const cfg = await ctx.configService.loadConfig();
-        if (!cfg.syncFolderPath) {
+        const requestedZoneId = reqUrl.searchParams.get('zoneId')?.trim();
+        const targetZone = requestedZoneId
+          ? (cfg.zones ?? []).find((z) => z.zoneId === requestedZoneId && z.joined)
+          : null;
+        const targetFolderPath = targetZone?.localFolderPath || cfg.syncFolderPath;
+
+        if (!targetFolderPath) {
           sendJson(res, 400, { error: 'Chưa chọn thư mục đồng bộ.' });
           return;
         }
-        const doc = ctx.folderWatcher
-          ? await ctx.folderWatcher.triggerScanNow()
-          : (await indexer.scanAndSyncLocalListFile(cfg.syncFolderPath, cfg.deviceName)).doc;
+        const doc =
+          ctx.folderWatcher && targetFolderPath === cfg.syncFolderPath
+            ? await ctx.folderWatcher.triggerScanNow()
+            : (await indexer.scanAndSyncLocalListFile(targetFolderPath, cfg.deviceName)).doc;
 
         sendJson(res, 200, {
           document: doc,
@@ -218,6 +249,128 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
         return;
       }
 
+      // GET /api/auth/mobile-bridge (One-tap sync of Google OAuth refreshToken & Telegram config to Mobile)
+      if (req.method === 'GET' && pathname === '/api/auth/mobile-bridge') {
+        try {
+          await oauth.getValidAccessToken();
+        } catch {
+          // Ignore if not logged in yet
+        }
+        const cfg = await ctx.configService.loadConfig();
+        sendJson(res, 200, {
+          googleAuth: {
+            clientId: cfg.googleAuth.clientId || process.env.GOOGLE_CLIENT_ID || null,
+            clientSecret: cfg.googleAuth.clientSecret || process.env.GOOGLE_CLIENT_SECRET || null,
+            email: cfg.googleAuth.email,
+            displayName: cfg.googleAuth.displayName,
+            accessToken: cfg.googleAuth.accessToken,
+            refreshToken: cfg.googleAuth.refreshToken,
+            expiryDate: cfg.googleAuth.expiryDate,
+            driveRootFolderId: cfg.googleAuth.driveRootFolderId,
+            listFileDriveId: cfg.googleAuth.listFileDriveId,
+          },
+          telegramBot: {
+            enabled: cfg.telegramBot.enabled,
+            botToken: cfg.telegramBot.botToken || process.env.TELEGRAM_BOT_TOKEN || '',
+            chatId: cfg.telegramBot.chatId,
+          },
+          zones: cfg.zones ?? [],
+        });
+        return;
+      }
+
+      // GET /api/zones
+      if (req.method === 'GET' && pathname === '/api/zones') {
+        if (ctx.syncCoordinator) {
+          const zones = await ctx.syncCoordinator.discoverZones();
+          const config = await ctx.configService.getPublicConfig();
+          sendJson(res, 200, { zones, activeZoneId: config.activeZoneId, config });
+          return;
+        }
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, {
+          zones: config.zones ?? [],
+          activeZoneId: config.activeZoneId,
+          config,
+        });
+        return;
+      }
+
+      // POST /api/zones/create
+      if (req.method === 'POST' && pathname === '/api/zones/create') {
+        if (!ctx.syncCoordinator) {
+          sendJson(res, 400, { error: 'SyncCoordinator chưa được khởi tạo.' });
+          return;
+        }
+        const body = await readJsonBody<{
+          zoneName: string;
+          description?: string;
+          localFolderPath: string;
+          existingDataStrategy?: ExistingDataStrategy;
+        }>(req);
+        const zone = await ctx.syncCoordinator.createZone(body);
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 201, { zone, config });
+        return;
+      }
+
+      // POST /api/zones/join
+      if (req.method === 'POST' && pathname === '/api/zones/join') {
+        if (!ctx.syncCoordinator) {
+          sendJson(res, 400, { error: 'SyncCoordinator chưa được khởi tạo.' });
+          return;
+        }
+        const body = await readJsonBody<{
+          zoneId: string;
+          localFolderPath: string;
+          existingDataStrategy?: ExistingDataStrategy;
+        }>(req);
+        const zone = await ctx.syncCoordinator.joinZone(body);
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, { zone, config });
+        return;
+      }
+
+      // POST /api/zones/leave
+      if (req.method === 'POST' && pathname === '/api/zones/leave') {
+        if (!ctx.syncCoordinator) {
+          sendJson(res, 400, { error: 'SyncCoordinator chưa được khởi tạo.' });
+          return;
+        }
+        const body = await readJsonBody<{ zoneId: string }>(req);
+        const zones = await ctx.syncCoordinator.leaveZone(body.zoneId);
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, { zones, config });
+        return;
+      }
+
+      // POST /api/zones/activate
+      if (req.method === 'POST' && pathname === '/api/zones/activate') {
+        if (!ctx.syncCoordinator) {
+          sendJson(res, 400, { error: 'SyncCoordinator chưa được khởi tạo.' });
+          return;
+        }
+        const body = await readJsonBody<{ zoneId: string }>(req);
+        const zone = await ctx.syncCoordinator.activateZone(body.zoneId);
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, { zone, config });
+        return;
+      }
+
+      // POST /api/zones/sync
+      if (req.method === 'POST' && pathname === '/api/zones/sync') {
+        if (!ctx.syncCoordinator) {
+          sendJson(res, 400, { error: 'SyncCoordinator chưa được khởi tạo.' });
+          return;
+        }
+        const body = await readJsonBody<{ zoneId: string }>(req);
+        const summary = await ctx.syncCoordinator.syncZone(body.zoneId, 'MANUAL_ZONE_UI');
+        const status = await ctx.syncCoordinator.getStatus();
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, { summary, status, config });
+        return;
+      }
+
       // GET /api/sync/status
       if (req.method === 'GET' && pathname === '/api/sync/status') {
         if (!ctx.syncCoordinator) {
@@ -267,6 +420,61 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
         return;
       }
 
+      // POST /api/telegram/pair/start (1-Click Deep-Link Pairing)
+      if (req.method === 'POST' && pathname === '/api/telegram/pair/start') {
+        if (!ctx.telegramService) {
+          sendJson(res, 400, { error: 'TelegramService chưa được khởi tạo.' });
+          return;
+        }
+        const body = await readJsonBody<{ botToken?: string }>(req);
+        const session = await ctx.telegramService.startPairingSession(body.botToken);
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, { session, config });
+        return;
+      }
+
+      // GET /api/telegram/chats (Discover recent chats/groups & check auto-pair status)
+      if (req.method === 'GET' && pathname === '/api/telegram/chats') {
+        if (!ctx.telegramService) {
+          sendJson(res, 400, { error: 'TelegramService chưa được khởi tạo.' });
+          return;
+        }
+        const tokenParam = reqUrl.searchParams.get('botToken') || undefined;
+        const result = await ctx.telegramService.discoverRecentChats(tokenParam);
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, { ...result, config });
+        return;
+      }
+
+      // POST /api/telegram/select-chat
+      if (req.method === 'POST' && pathname === '/api/telegram/select-chat') {
+        if (!ctx.telegramService) {
+          sendJson(res, 400, { error: 'TelegramService chưa được khởi tạo.' });
+          return;
+        }
+        const body = await readJsonBody<{
+          chatId: string;
+          chatTitle?: string;
+          botToken?: string;
+        }>(req);
+        await ctx.telegramService.selectChat(body.chatId, body.chatTitle, body.botToken);
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, config);
+        return;
+      }
+
+      // POST /api/telegram/disconnect
+      if (req.method === 'POST' && pathname === '/api/telegram/disconnect') {
+        if (!ctx.telegramService) {
+          sendJson(res, 400, { error: 'TelegramService chưa được khởi tạo.' });
+          return;
+        }
+        await ctx.telegramService.disconnect();
+        const config = await ctx.configService.getPublicConfig();
+        sendJson(res, 200, config);
+        return;
+      }
+
       // Serve built static Web UI if available
       if (req.method === 'GET' && ctx.staticWebDir && !pathname.startsWith('/api/')) {
         const served = await tryServeStaticFile(ctx.staticWebDir, pathname, res);
@@ -299,7 +507,12 @@ export function createAgentHttpServer(ctx: AgentServerContext): http.Server {
     ctx.syncCoordinator.on('syncStarted', (evt) => broadcast('syncStarted', evt));
     ctx.syncCoordinator.on('syncCompleted', (evt) => broadcast('syncCompleted', evt));
     ctx.syncCoordinator.on('syncError', (evt) => broadcast('syncError', evt));
+    ctx.syncCoordinator.on('syncProgress', (evt) => broadcast('syncProgress', evt));
     ctx.syncCoordinator.on('logAdded', (evt) => broadcast('logAdded', evt));
+  }
+
+  if (ctx.telegramService) {
+    ctx.telegramService.on('telegramPaired', (evt) => broadcast('telegramPaired', evt));
   }
 
   server.on('close', () => {
